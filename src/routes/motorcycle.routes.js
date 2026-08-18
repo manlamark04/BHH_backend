@@ -28,6 +28,22 @@ router.get('/rentals', authenticate, svc.getAllRentals);
 // Get single rental details + audit
 router.get('/rentals/:id', authenticate, svc.getRentalById);
 
+// Staff/Admin: Approve rental request
+router.patch('/rentals/:id/approve',
+  authenticate,
+  requireRole('staff', 'admin'),
+  svc.approveMotorRental
+);
+
+// Staff/Admin: Reject rental request
+router.patch('/rentals/:id/reject',
+  authenticate,
+  requireRole('staff', 'admin'),
+  [body('reason').trim().notEmpty().withMessage('Rejection reason is required.')],
+  validate,
+  svc.rejectMotorRental
+);
+
 // Staff/Admin: Process return
 router.post('/rentals/:id/return',
   authenticate,

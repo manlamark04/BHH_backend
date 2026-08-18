@@ -49,4 +49,10 @@ router.post('/payments/:id/refund',
   validate, svc.refundPayment
 );
 
+// POST /api/bills/:id/cancel — Staff/Admin: cancel an unpaid bill
+router.post('/:id/cancel',
+  authenticate, requireRole('staff', 'admin'),
+  svc.cancelBill
+);
+
 module.exports = router;

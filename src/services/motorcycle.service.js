@@ -94,23 +94,52 @@ async function checkAndUpdateOverdueRentals() {
 async function getMotorcycles(req, res) {
   try {
     const { status, type, brand } = req.query;
-    let sql = `SELECT * FROM motorcycles WHERE 1=1`;
+    let sql = `
+      SELECT 
+        m.id,
+        m.motor_id,
+        m.brand,
+        m.model,
+        m.type,
+        m.plate_number,
+        m.rental_rate,
+        m.rate_type,
+        m.description,
+        m.image_url,
+        CASE 
+          WHEN m.status = 'MAINTENANCE' THEN 'MAINTENANCE'
+          WHEN active_r.id IS NOT NULL THEN 'RENTED'
+          ELSE m.status 
+        END AS status,
+        m.created_at,
+        m.updated_at,
+        active_r.rental_id AS active_rental_id,
+        active_r.status AS active_rental_status,
+        active_r.expected_return_datetime
+      FROM motorcycles m
+      LEFT JOIN (
+        SELECT mr.id, mr.motor_id, mr.rental_id, mr.status, mr.expected_return_datetime
+        FROM motor_rentals mr
+        WHERE mr.status IN ('PENDING_PAYMENT', 'PENDING_APPROVAL', 'ACTIVE', 'OVERDUE')
+      ) active_r ON active_r.motor_id = m.id
+      WHERE 1=1
+    `;
     const params = [];
 
     if (status && status !== 'ALL' && status !== 'All') {
-      sql += ` AND status = ?`;
-      params.push(status.toUpperCase());
+      sql += ` AND (m.status = ? OR (active_r.id IS NOT NULL AND ? = 'RENTED'))`;
+      params.push(status.toUpperCase(), status.toUpperCase());
     }
     if (type && type !== 'ALL') {
-      sql += ` AND type = ?`;
+      sql += ` AND m.type = ?`;
       params.push(type);
     }
     if (brand && brand !== 'ALL') {
-      sql += ` AND brand = ?`;
+      sql += ` AND m.brand = ?`;
       params.push(brand);
     }
 
-    sql += ` ORDER BY brand ASC, model ASC`;
+    sql += ` ORDER BY m.brand ASC, m.model ASC`;
     const [rows] = await pool.query(sql, params);
     res.json(rows);
   } catch (err) {
@@ -363,15 +392,17 @@ async function createMotorRental(req, res) {
     // Generate unique Rental ID: MTR-YYYY-XXXX
     const rentalId = await generateNextRentalId(conn);
 
-    // Initial status: ACTIVE
-    const initialStatus = 'ACTIVE';
+    const isCustomer = req.user.role === 'customer';
+    const requestLifecycle = require('./request-lifecycle.service');
+    const paymentDeadline = isCustomer ? requestLifecycle.getPaymentDeadline() : null;
+    let initialStatus = isCustomer ? 'PENDING_PAYMENT' : 'ACTIVE';
 
     // Insert into motor_rentals
     const [rentalResult] = await conn.query(
       `INSERT INTO motor_rentals (
         rental_id, customer_id, motor_id, start_datetime, expected_return_datetime,
-        duration, rate, rate_type, total_amount, final_amount, status, notes, created_by, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+        duration, rate, rate_type, total_amount, final_amount, status, notes, payment_deadline, created_by, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
       [
         rentalId,
         targetCustomerId,
@@ -385,13 +416,45 @@ async function createMotorRental(req, res) {
         totalAmount,
         initialStatus,
         notes || null,
+        paymentDeadline,
         req.user.id,
       ]
     );
 
     const newRentalDbId = rentalResult.insertId;
 
-    // Update motorcycle status to RENTED
+    // Generate bill for this motor rental
+    const currentYear = new Date().getFullYear();
+    const billNumber = `BILL-${rentalId}`;
+    const initialPayAmount = req.body.initial_payment ? Number(req.body.initial_payment) : (isCustomer ? 0 : totalAmount);
+
+    const [billRes] = await conn.query(`
+      INSERT INTO bills (bill_number, customer_id, total_amount, paid_amount, status, issued_by, issued_at)
+      VALUES (?, ?, ?, ?, ?, ?, NOW())
+    `, [
+      billNumber,
+      targetCustomerId,
+      totalAmount,
+      initialPayAmount,
+      initialPayAmount >= totalAmount ? 'paid' : (initialPayAmount > 0 ? 'partially_paid' : 'unpaid'),
+      req.user.id || targetCustomerId,
+    ]);
+
+    const billId = billRes.insertId;
+
+    await conn.query(`
+      INSERT INTO bill_line_items (bill_id, description, quantity, unit_price)
+      VALUES (?, ?, ?, ?)
+    `, [billId, `Motor Rental: ${motor.brand} ${motor.model} (${motor.plate_number}) - ${duration} ${rateType === 'hourly' ? 'hour(s)' : 'day(s)'}`, duration, rate]);
+
+    if (initialPayAmount > 0) {
+      await conn.query(`
+        INSERT INTO payments (bill_id, amount, method, received_by, notes, paid_at)
+        VALUES (?, ?, ?, ?, ?, NOW())
+      `, [billId, initialPayAmount, req.body.payment_method || 'cash', req.user.id, `Payment for ${rentalId}`]);
+    }
+
+    // Update motorcycle status to RENTED immediately so it shows unavailable to other guests
     await conn.query('UPDATE motorcycles SET status = ? WHERE id = ?', ['RENTED', motor_id]);
 
     // Create Audit Log
@@ -400,11 +463,23 @@ async function createMotorRental(req, res) {
       rentalId: newRentalDbId,
       rentalUniqueId: rentalId,
       motorId: motor_id,
-      action: 'Motorcycle rented',
+      action: isCustomer ? 'Motor rental requested' : 'Motorcycle rented',
       performedBy: req.user.id,
       performedByName: performerName,
       performedByRole: req.user.role,
-      remarks: `Rental ${rentalId} created for ${customer.full_name} (${motor.brand} ${motor.model}, Plate: ${motor.plate_number}). Duration: ${duration} ${rateType === 'hourly' ? 'hours' : 'days'}, Total: ₱${totalAmount.toLocaleString()}`,
+      remarks: `Rental ${rentalId} created for ${customer.full_name} (${motor.brand} ${motor.model}, Plate: ${motor.plate_number}). Status: ${initialStatus}. Duration: ${duration} ${rateType === 'hourly' ? 'hours' : 'days'}, Total: ₱${totalAmount.toLocaleString()}`,
+    });
+
+    await requestLifecycle.logAudit(conn, {
+      entityType: 'motor_rental',
+      entityId: newRentalDbId,
+      fromStatus: null,
+      toStatus: initialStatus,
+      performedBy: req.user.id,
+      performedByName: performerName,
+      triggerType: 'manual',
+      reason: isCustomer ? 'Customer requested motor rental. Awaiting payment.' : 'Staff created motor rental.',
+      metadata: { rentalId, totalAmount, paymentDeadline },
     });
 
     // Commit Transaction
@@ -426,7 +501,7 @@ async function createMotorRental(req, res) {
     );
 
     res.status(201).json({
-      message: 'Motorcycle rental confirmed successfully!',
+      message: isCustomer ? 'Motorcycle rental request submitted. Please complete payment.' : 'Motorcycle rental confirmed successfully!',
       rental: createdRows[0],
     });
   } catch (err) {
@@ -686,6 +761,37 @@ async function cancelMotorRental(req, res) {
   }
 }
 
+/** PATCH /api/motorcycles/rentals/:id/approve — Staff/Admin: Approve rental */
+async function approveMotorRental(req, res) {
+  try {
+    const targetRentalId = req.params.id;
+    const [rentalRows] = await pool.query('SELECT id FROM motor_rentals WHERE (id = ? OR rental_id = ?)', [targetRentalId, targetRentalId]);
+    if (rentalRows.length === 0) return res.status(404).json({ message: 'Rental not found.' });
+    
+    const requestLifecycle = require('./request-lifecycle.service');
+    const result = await requestLifecycle.approveRequest('motor_rental', rentalRows[0].id, req.user);
+    res.json(result);
+  } catch (err) {
+    res.status(err.statusCode || 500).json({ message: err.message });
+  }
+}
+
+/** PATCH /api/motorcycles/rentals/:id/reject — Staff/Admin: Reject rental */
+async function rejectMotorRental(req, res) {
+  try {
+    const targetRentalId = req.params.id;
+    const [rentalRows] = await pool.query('SELECT id FROM motor_rentals WHERE (id = ? OR rental_id = ?)', [targetRentalId, targetRentalId]);
+    if (rentalRows.length === 0) return res.status(404).json({ message: 'Rental not found.' });
+    
+    const { reason, notes } = req.body;
+    const requestLifecycle = require('./request-lifecycle.service');
+    const result = await requestLifecycle.rejectRequest('motor_rental', rentalRows[0].id, req.user, reason, notes);
+    res.json(result);
+  } catch (err) {
+    res.status(err.statusCode || 500).json({ message: err.message });
+  }
+}
+
 module.exports = {
   getMotorcycles,
   getMotorcycleById,
@@ -696,4 +802,6 @@ module.exports = {
   getRentalById,
   processMotorReturn,
   cancelMotorRental,
+  approveMotorRental,
+  rejectMotorRental,
 };

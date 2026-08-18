@@ -74,6 +74,9 @@ router.get('/pending', authenticate, requireRole('admin'), svc.getPendingUsers);
 // Admin: approve user
 router.post('/approve/:id', authenticate, requireRole('admin'), svc.approveUser);
 
+// Admin: approve customer with account credentials
+router.post('/approve-customer/:id', authenticate, requireRole('admin'), svc.approveCustomerAccount);
+
 // Admin: reject user
 router.post('/reject/:id',
   authenticate, requireRole('admin'),
@@ -88,11 +91,18 @@ router.post('/toggle/:id', authenticate, requireRole('admin'), svc.toggleUserSta
 router.post('/staff',
   authenticate, requireRole('admin'),
   [
-    body('full_name').trim().notEmpty(),
+    body('first_name').optional().trim(),
+    body('middle_name').optional().trim(),
+    body('last_name').optional().trim(),
+    body('full_name').optional().trim(),
     body('email').isEmail().normalizeEmail(),
     body('username').trim().isLength({ min: 3 }),
     body('phone').optional().trim(),
-    body('password').isLength({ min: 8 }).withMessage('Password must be at least 8 characters.'),
+    body('address').optional().trim(),
+    body('dob').optional().trim(),
+    body('gender').optional().trim(),
+    body('civil_status').optional().trim(),
+    body('password').isLength({ min: 6 }).withMessage('Password must be at least 6 characters.'),
   ],
   validate, svc.createStaff
 );

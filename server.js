@@ -40,6 +40,9 @@ async function start() {
     await ensureUploadsDir();
     await seedInitialAdmin();
 
+    const { startScheduler } = require('./src/services/scheduler');
+    startScheduler(60000); // 1 minute auto-cancel check
+
     app.listen(PORT, () => {
       console.log(`🚀 BHH Backend running on http://localhost:${PORT}`);
       console.log(`   Environment: ${process.env.NODE_ENV || 'development'}`);

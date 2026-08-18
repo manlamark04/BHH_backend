@@ -13,6 +13,7 @@ const bookingRoutes   = require('./routes/bookings.routes');
 const billingRoutes   = require('./routes/billing.routes');
 const reportRoutes      = require('./routes/reports.routes');
 const motorcycleRoutes  = require('./routes/motorcycle.routes');
+const auditRoutes       = require('./routes/audit.routes');
 
 const app = express();
 
@@ -39,6 +40,7 @@ app.use('/api/motorcycles', motorcycleRoutes);
 app.use('/api/bookings',    bookingRoutes);
 app.use('/api/bills',       billingRoutes);
 app.use('/api/reports',     reportRoutes);
+app.use('/api/audit',       auditRoutes);
 
 const pool = require('./config/db');
 

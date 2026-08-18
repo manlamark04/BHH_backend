@@ -595,6 +595,7 @@ async function getAllUsers(req, res) {
         u.username,
         u.status,
         u.must_change_password,
+        u.default_password,
         u.created_by,
         u.created_at,
         u.approved_by,
@@ -694,12 +695,60 @@ async function toggleUserStatus(req, res) {
 /** POST /api/users/staff — Admin: create staff account */
 async function createStaff(req, res) {
   try {
-    const { full_name, email, phone, username, password } = req.body;
+    const {
+      first_name,
+      middle_name,
+      last_name,
+      full_name,
+      email,
+      phone,
+      username,
+      password,
+      address,
+      dob,
+      gender,
+      civil_status,
+    } = req.body;
+
     if (!password) return res.status(400).json({ message: 'Password is required.' });
+
+    const finalFullName = (full_name && full_name.trim())
+      ? full_name.trim()
+      : [first_name, middle_name, last_name].filter(Boolean).map(s => String(s).trim()).join(' ');
+
+    if (!finalFullName) {
+      return res.status(400).json({ message: 'Name is required.' });
+    }
+
     const passwordHash = await bcrypt.hash(password, SALT_ROUNDS);
-    const user = await db.users.create('staff', full_name, email, phone || null, username, passwordHash, req.user.id, null);
+    const user = await db.users.create('staff', finalFullName, email, phone || null, username, passwordHash, req.user.id, null);
     if (!user) return res.status(500).json({ message: 'Staff creation failed.' });
-    await pool.query('UPDATE users SET status = ? WHERE id = ?', ['active', user.id]);
+
+    await pool.query(
+      `UPDATE users 
+       SET status = 'active', 
+           first_name = ?, 
+           middle_name = ?, 
+           last_name = ?, 
+           address = ?, 
+           dob = ?, 
+           gender = ?, 
+           civil_status = ?,
+           default_password = ?
+       WHERE id = ?`,
+      [
+        first_name || null,
+        middle_name || null,
+        last_name || null,
+        address || null,
+        dob || null,
+        gender || null,
+        civil_status || null,
+        password,
+        user.id
+      ]
+    );
+
     const fresh = await db.auth.getUserById(user.id);
     const { password_hash, ...safeUser } = fresh;
     res.status(201).json({ message: 'Staff account created.', ...safeUser });
@@ -708,6 +757,83 @@ async function createStaff(req, res) {
       return res.status(409).json({ message: 'Email or username already exists.' });
     }
     res.status(500).json({ message: err.message });
+  }
+}
+
+/** POST /api/users/approve-customer/:id — Admin: approve and create account credentials for customer */
+async function approveCustomerAccount(req, res) {
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    const targetId = parseInt(req.params.id, 10);
+    const { username, password, unique_id } = req.body;
+
+    const [rows] = await conn.query('SELECT * FROM users WHERE id = ?', [targetId]);
+    if (rows.length === 0) {
+      await conn.rollback();
+      return res.status(404).json({ message: 'Customer registration not found.' });
+    }
+    const user = rows[0];
+
+    let defaultPw = password && password.trim() ? password.trim() : (user.default_password || 'user123');
+    let passwordHash = user.password_hash;
+    let mustChangePassword = 1;
+    if (password && password.trim()) {
+      passwordHash = await bcrypt.hash(password.trim(), SALT_ROUNDS);
+    }
+
+    const finalUsername = username ? username.trim().toLowerCase() : user.username;
+    const finalUniqueId = unique_id ? unique_id.trim() : user.unique_id;
+
+    // Check if username changed and is already taken
+    if (finalUsername !== user.username) {
+      const [existingUser] = await conn.query('SELECT id FROM users WHERE username = ? AND id != ?', [finalUsername, targetId]);
+      if (existingUser.length > 0) {
+        await conn.rollback();
+        return res.status(409).json({ message: 'Username is already taken by another user.' });
+      }
+    }
+
+    await conn.query(
+      `UPDATE users 
+       SET status = 'active', 
+           username = ?, 
+           unique_id = ?, 
+           password_hash = ?, 
+           default_password = ?,
+           must_change_password = ?, 
+           approved_by = ?, 
+           approved_at = NOW(), 
+           updated_at = NOW() 
+       WHERE id = ?`,
+      [finalUsername, finalUniqueId, passwordHash, defaultPw, mustChangePassword, req.user.id, targetId]
+    );
+
+    // Audit Log
+    const performerName = req.user.full_name || req.user.username || 'Admin';
+    await logCustomerAction(conn, {
+      customerId: targetId,
+      customerUniqueId: finalUniqueId,
+      action: 'Customer Account Approved & Created',
+      performedBy: req.user.id,
+      performedByName: performerName,
+      performedByRole: req.user.role,
+      remarks: `Customer account approved and activated by ${performerName}. Login username: ${finalUsername}.`,
+    });
+
+    await conn.commit();
+
+    const [updatedRows] = await pool.query('SELECT id, unique_id, role, full_name, email, phone, username, status, approved_at FROM users WHERE id = ?', [targetId]);
+    res.json({
+      message: `Account for ${user.full_name} has been approved and activated! The customer can now log in.`,
+      user: updatedRows[0],
+    });
+  } catch (err) {
+    await conn.rollback();
+    console.error('Approve customer account failed:', err);
+    res.status(500).json({ message: err.message || 'Failed to approve customer account.' });
+  } finally {
+    conn.release();
   }
 }
 
@@ -731,5 +857,6 @@ module.exports = {
   rejectUser,
   toggleUserStatus,
   createStaff,
+  approveCustomerAccount,
   searchCustomers,
 };
