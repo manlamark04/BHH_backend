@@ -100,11 +100,12 @@ async function getAllBills(req, res) {
       const validPayments = billPayments.filter((p) => !p.is_refunded);
       const computedPaid = validPayments.reduce((sum, p) => sum + Number(p.amount || 0), 0);
       const totalAmount = Number(b.total_amount || 0);
-      const remainingBalance = Math.max(0, totalAmount - computedPaid);
+      let remainingBalance = Math.max(0, totalAmount - computedPaid);
 
       let status = String(b.status || '').toUpperCase();
       if (status === 'CANCELLED' || status === 'VOID') {
         status = 'CANCELLED';
+        remainingBalance = 0;
       } else if (computedPaid >= totalAmount && totalAmount > 0) {
         status = 'PAID';
       } else if (computedPaid > 0) {

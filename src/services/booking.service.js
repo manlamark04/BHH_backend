@@ -280,7 +280,9 @@ async function createBooking(req, res) {
       if (payTransition.transitioned) {
         initialStatus = payTransition.newStatus;
       }
-    } else {
+      // Mark room as reserved
+      await pool.query("UPDATE rooms SET status = 'reserved', updated_at = NOW() WHERE id = ?", [room_id]);
+
       // Audit log creation in pending_payment
       await requestLifecycle.logAudit(pool, {
         entityType: 'booking',
@@ -389,11 +391,11 @@ async function updateBookingStatus(req, res) {
 
     // Synchronize room status
     if (normStatus === 'checked_in') {
-      await pool.query("UPDATE rooms SET status = 'occupied' WHERE id = ?", [booking.room_id]);
-    } else if (normStatus === 'checked_out') {
-      await pool.query("UPDATE rooms SET status = 'available' WHERE id = ?", [booking.room_id]);
+      await pool.query("UPDATE rooms SET status = 'occupied', updated_at = NOW() WHERE id = ?", [booking.room_id]);
+    } else if (normStatus === 'checked_out' || normStatus === 'completed') {
+      await pool.query("UPDATE rooms SET status = 'cleaning', updated_at = NOW() WHERE id = ?", [booking.room_id]);
     } else if (normStatus === 'cancelled') {
-      await pool.query("UPDATE rooms SET status = 'available' WHERE id = ?", [booking.room_id]);
+      await pool.query("UPDATE rooms SET status = 'available', updated_at = NOW() WHERE id = ?", [booking.room_id]);
     }
 
     // Audit log

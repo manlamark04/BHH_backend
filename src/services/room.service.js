@@ -13,23 +13,44 @@ async function getRooms(req, res) {
         r.room_type,
         r.capacity,
         r.rate_per_night,
-        r.status,
+        CASE
+          WHEN LOWER(r.status) IN ('maintenance', 'cleaning', 'unavailable', 'inactive') THEN LOWER(r.status)
+          WHEN occ_bkg.id IS NOT NULL THEN 'occupied'
+          WHEN res_bkg.id IS NOT NULL THEN 'reserved'
+          ELSE 'available'
+        END AS status,
         r.description,
         r.image_urls,
         r.created_at,
         r.updated_at,
-        COALESCE(curr_bkg.id, NULL) AS current_booking_id,
-        COALESCE(curr_bkg.customer_name, NULL) AS current_guest_name,
-        COALESCE(curr_bkg.check_in, NULL) AS current_check_in,
-        COALESCE(curr_bkg.check_out, NULL) AS current_check_out
+        COALESCE(occ_bkg.id, res_bkg.id, NULL) AS current_booking_id,
+        COALESCE(occ_bkg.customer_name, res_bkg.customer_name, NULL) AS current_guest_name,
+        COALESCE(occ_bkg.check_in, res_bkg.check_in, NULL) AS current_check_in,
+        COALESCE(occ_bkg.check_out, res_bkg.check_out, NULL) AS current_check_out
       FROM rooms r
       LEFT JOIN (
         SELECT 
           b.id, b.room_id, u.full_name AS customer_name, b.check_in, b.check_out
         FROM bookings b
         JOIN users u ON u.id = b.customer_id
+        LEFT JOIN (
+          SELECT bill.booking_id, SUM(p.amount) AS total_paid
+          FROM bills bill
+          JOIN payments p ON p.bill_id = bill.id
+          WHERE p.notes IS NULL OR p.notes NOT LIKE '%[REFUNDED%'
+          GROUP BY bill.booking_id
+        ) paid_tbl ON paid_tbl.booking_id = b.id
+        JOIN rooms rm ON rm.id = b.room_id
         WHERE b.status = 'checked_in'
-      ) curr_bkg ON curr_bkg.room_id = r.id
+           OR (b.status IN ('confirmed', 'pending_approval') AND COALESCE(paid_tbl.total_paid, 0) >= (GREATEST(1, DATEDIFF(b.check_out, b.check_in)) * rm.rate_per_night) AND COALESCE(paid_tbl.total_paid, 0) > 0)
+      ) occ_bkg ON occ_bkg.room_id = r.id
+      LEFT JOIN (
+        SELECT 
+          b.id, b.room_id, u.full_name AS customer_name, b.check_in, b.check_out
+        FROM bookings b
+        JOIN users u ON u.id = b.customer_id
+        WHERE b.status NOT IN ('cancelled', 'checked_out', 'rejected')
+      ) res_bkg ON res_bkg.room_id = r.id
       WHERE 1=1
     `;
 
