@@ -175,6 +175,8 @@ async function login(req, res) {
         role:                 user.role,
         full_name:            user.full_name,
         email:                user.email,
+        gender:               user.gender || null,
+        civil_status:         user.civil_status || null,
         must_change_password: Boolean(user.must_change_password),
       },
     });
