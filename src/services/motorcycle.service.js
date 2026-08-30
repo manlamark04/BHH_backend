@@ -285,6 +285,50 @@ async function updateMotorcycle(req, res) {
   }
 }
 
+/** PATCH /api/motorcycles/:id/status — Staff/Admin: Update status only */
+async function updateMotorcycleStatus(req, res) {
+  try {
+    const { status } = req.body;
+    const motorId = req.params.id;
+    const validStatuses = ['AVAILABLE', 'RESERVED', 'RENTED', 'MAINTENANCE', 'INACTIVE'];
+
+    if (!status || !validStatuses.includes(status.toUpperCase())) {
+      return res.status(400).json({ message: `Invalid status. Must be one of: ${validStatuses.join(', ')}` });
+    }
+
+    const [existing] = await pool.query('SELECT * FROM motorcycles WHERE id = ?', [motorId]);
+    if (!existing || existing.length === 0) {
+      return res.status(404).json({ message: 'Motorcycle not found.' });
+    }
+
+    const newStatus = status.toUpperCase();
+    await pool.query('UPDATE motorcycles SET status = ?, updated_at = NOW() WHERE id = ?', [newStatus, motorId]);
+
+    const [updated] = await pool.query('SELECT * FROM motorcycles WHERE id = ?', [motorId]);
+
+    // Record Audit Log
+    try {
+      await pool.query(
+        `INSERT INTO audit_logs (user_id, action, entity_type, entity_id, ip_address, created_at)
+         VALUES (?, ?, 'motorcycle', ?, ?, NOW())`,
+        [
+          req.user?.id || null,
+          `${req.user?.role === 'admin' ? 'Admin' : 'Staff'} ${req.user?.full_name || 'Staff'} changed status of ${updated[0].brand} ${updated[0].model} (${updated[0].plate_number}) to ${newStatus}`,
+          motorId,
+          req.ip || null
+        ]
+      );
+    } catch (auditErr) {
+      console.warn('Audit log write skipped:', auditErr.message);
+    }
+
+    res.json({ message: `Motorcycle status updated to ${newStatus}.`, motorcycle: updated[0] });
+  } catch (err) {
+    console.error('Update motorcycle status error:', err);
+    res.status(500).json({ message: err.message || 'Failed to update motorcycle status.' });
+  }
+}
+
 // ─── MOTORCYCLE RENTAL TRANSACTIONS ───────────────────────────
 
 /** POST /api/motorcycles/rentals — Create & Confirm a Motorcycle Rental */
@@ -333,6 +377,39 @@ async function createMotorRental(req, res) {
     const customer = custRows[0];
     if (customer.status !== 'active') {
       return res.status(400).json({ message: `Customer account is ${customer.status}. Only active customers can rent motorcycles.` });
+    }
+
+    // 1b. Enforce One-Motorcycle-Rental-at-a-Time rule:
+    // A guest who already has an in-progress rental (PENDING_PAYMENT, PENDING_APPROVAL, ACTIVE, RESERVED, OVERDUE)
+    // cannot rent another motorcycle until their current rental is COMPLETED, CANCELLED, or REJECTED.
+    const [existingRentals] = await conn.query(
+      `SELECT mr.id, mr.rental_id, mr.status, mr.start_datetime, mr.expected_return_datetime,
+              m.brand, m.model, m.plate_number
+       FROM motor_rentals mr
+       JOIN motorcycles m ON m.id = mr.motor_id
+       WHERE mr.customer_id = ?
+         AND mr.status IN ('PENDING_PAYMENT', 'PENDING_APPROVAL', 'ACTIVE', 'RESERVED', 'OVERDUE')
+       ORDER BY mr.id DESC
+       LIMIT 1`,
+      [targetCustomerId]
+    );
+
+    if (existingRentals && existingRentals.length > 0) {
+      const activeR = existingRentals[0];
+      const bikeLabel = `${activeR.brand || ''} ${activeR.model || 'Motorcycle'}`.trim();
+      const plateLabel = activeR.plate_number ? ` · Plate ${activeR.plate_number}` : '';
+      const statusLabel = String(activeR.status).replace('_', ' ');
+
+      const message = req.user.role === 'customer'
+        ? `You already have a motorcycle rental in progress (${bikeLabel}${plateLabel} · ${statusLabel}). You can only rent one motorcycle at a time. Please complete or return your current rental before renting another.`
+        : `Guest ${customer.full_name || 'Guest'} already has an active or pending motorcycle rental (${bikeLabel}${plateLabel} · ${statusLabel}). Only one motorcycle rental is permitted per guest at a time.`;
+
+      return res.status(409).json({
+        conflict: true,
+        has_active_rental: true,
+        existing_rental: activeR,
+        message
+      });
     }
 
     // 2. Verify Motorcycle exists and check current status
@@ -797,6 +874,7 @@ module.exports = {
   getMotorcycleById,
   createMotorcycle,
   updateMotorcycle,
+  updateMotorcycleStatus,
   createMotorRental,
   getAllRentals,
   getRentalById,

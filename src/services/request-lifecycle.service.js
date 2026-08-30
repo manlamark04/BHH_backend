@@ -142,8 +142,8 @@ async function handlePaymentReceived(entityType, entityId, paymentInfo = {}) {
   const gate = await checkPaymentGate(entityType, entityId);
   const normStatus = String(gate.currentStatus || '').toLowerCase();
 
-  if (gate.isPaid && (normStatus === 'pending_payment' || normStatus === 'pending_approval' || normStatus === 'pending' || normStatus === 'requested')) {
-    const targetStatus = entityType === 'motor_rental' ? 'ACTIVE' : (entityType === 'booking' ? 'checked_in' : 'confirmed');
+  if (gate.isPaid && (normStatus === 'pending_payment' || normStatus === 'pending_approval' || normStatus === 'pending' || normStatus === 'requested' || normStatus === 'confirmed')) {
+    const targetStatus = entityType === 'motor_rental' ? 'ACTIVE' : (entityType === 'booking' ? 'checked_in' : 'active');
     const tableName = entityType === 'booking' ? 'bookings' : (entityType === 'motor_rental' ? 'motor_rentals' : 'activity_rentals');
 
     await pool.query(
@@ -177,7 +177,7 @@ async function handlePaymentReceived(entityType, entityId, paymentInfo = {}) {
       performedBy: paymentInfo.userId || null,
       performedByName: paymentInfo.userName || 'Automatic Payment Approval',
       triggerType: 'payment',
-      reason: `Payment verified (₱${gate.totalPaid.toLocaleString()} of ₱${gate.totalPrice.toLocaleString()}). Automatically checked in and confirmed upon payment.`,
+      reason: `Payment verified (₱${gate.totalPaid.toLocaleString()} of ₱${gate.totalPrice.toLocaleString()}). Automatically ${entityType === 'activity_rental' ? 'started match and activated court session' : 'checked in and confirmed'} upon payment.`,
       metadata: { totalPaid: gate.totalPaid, depositRequired: gate.depositRequired, payment: gate.latestPayment },
     });
 
@@ -202,14 +202,14 @@ async function approveRequest(entityType, entityId, staffUser) {
   }
 
   // Must be in pending_approval (or pending_payment if just paid)
-  if (!['pending_approval', 'pending_payment', 'pending', 'requested'].includes(normStatus)) {
+  if (!['pending_approval', 'pending_payment', 'pending', 'requested', 'confirmed'].includes(normStatus)) {
     const err = new Error(`Cannot approve request with current status "${gate.currentStatus}".`);
     err.statusCode = 400;
     throw err;
   }
 
   const tableName = entityType === 'booking' ? 'bookings' : (entityType === 'motor_rental' ? 'motor_rentals' : 'activity_rentals');
-  const targetStatus = entityType === 'motor_rental' ? 'ACTIVE' : 'confirmed';
+  const targetStatus = entityType === 'motor_rental' ? 'ACTIVE' : (entityType === 'activity_rental' ? 'active' : 'confirmed');
 
   await pool.query(
     `UPDATE ${tableName} 
@@ -271,6 +271,15 @@ async function rejectRequest(entityType, entityId, staffUser, reason, notes = ''
     }
   }
 
+  // Cancel associated bill
+  const billFkCol = entityType === 'booking' ? 'booking_id' : (entityType === 'motor_rental' ? 'motor_rental_id' : 'activity_rental_id');
+  await pool.query(
+    `UPDATE bills 
+     SET status = 'cancelled', cancellation_fee = 0.00, updated_at = NOW() 
+     WHERE ${billFkCol} = ?`,
+    [entityId]
+  );
+
   // If paid, create a refund record for finance reconciliation
   let refundId = null;
   if (gate.totalPaid > 0) {
@@ -314,16 +323,35 @@ async function rejectRequest(entityType, entityId, staffUser, reason, notes = ''
 /**
  * Cancel request (Customer or Staff before payment, or timeout)
  */
-async function cancelRequest(entityType, entityId, user, reason = 'Cancelled by user', autoCancelled = false) {
+async function cancelRequest(entityType, entityId, user, reason = 'Cancelled by user', autoCancelled = false, cancellationFee = 0.00) {
   const gate = await checkPaymentGate(entityType, entityId);
   const tableName = entityType === 'booking' ? 'bookings' : (entityType === 'motor_rental' ? 'motor_rentals' : 'activity_rentals');
   const targetStatus = entityType === 'motor_rental' ? 'CANCELLED' : 'cancelled';
+  const fee = Number(cancellationFee || 0);
 
+  if (entityType === 'booking') {
+    await pool.query(
+      `UPDATE bookings 
+       SET status = ?, auto_cancelled = ?, cancellation_fee = ?, updated_at = NOW() 
+       WHERE id = ?`,
+      [targetStatus, autoCancelled ? 1 : 0, fee, entityId]
+    );
+  } else {
+    await pool.query(
+      `UPDATE ${tableName} 
+       SET status = ?, auto_cancelled = ?, updated_at = NOW() 
+       WHERE id = ?`,
+      [targetStatus, autoCancelled ? 1 : 0, entityId]
+    );
+  }
+
+  // Cancel associated bill and record cancellation fee
+  const billFkCol = entityType === 'booking' ? 'booking_id' : (entityType === 'motor_rental' ? 'motor_rental_id' : 'activity_rental_id');
   await pool.query(
-    `UPDATE ${tableName} 
-     SET status = ?, auto_cancelled = ?, updated_at = NOW() 
-     WHERE id = ?`,
-    [targetStatus, autoCancelled ? 1 : 0, entityId]
+    `UPDATE bills 
+     SET status = 'cancelled', cancellation_fee = ?, updated_at = NOW() 
+     WHERE ${billFkCol} = ?`,
+    [fee, entityId]
   );
 
   // If motor rental, release motorcycle
@@ -343,10 +371,15 @@ async function cancelRequest(entityType, entityId, user, reason = 'Cancelled by 
     performedByName: user?.full_name || (autoCancelled ? 'System Auto-Timeout' : 'User'),
     triggerType: autoCancelled ? 'system' : 'manual',
     reason,
-    metadata: { autoCancelled },
+    metadata: { 
+      autoCancelled,
+      cancellationFee: fee,
+      voidedOutstanding: fee === 0,
+      totalPaid: gate.totalPaid,
+    },
   });
 
-  return { success: true, status: targetStatus, message: 'Request cancelled.' };
+  return { success: true, status: targetStatus, cancellation_fee: fee, message: 'Request cancelled.' };
 }
 
 /**

@@ -49,6 +49,15 @@ router.patch('/rentals/:id/status',
   validate, svc.updateRentalStatus
 );
 
+router.post('/rentals/:id/extend',
+  authenticate, requireRole('staff', 'admin'),
+  [
+    body('additional_hours').isFloat({ min: 0.25 }).withMessage('Additional hours must be at least 0.25 hours (15 mins).'),
+    body('amount_paid').isFloat({ min: 0 }).withMessage('Amount paid is required.'),
+  ],
+  validate, svc.extendRental
+);
+
 // ── Room Bookings Master ──────────────────────────────────
 
 // GET /api/bookings — Staff/Admin: all bookings
@@ -60,7 +69,18 @@ router.post('/',
   [
     body('room_id').notEmpty().withMessage('room_id is required.'),
     body('check_in').notEmpty().withMessage('check_in must be a valid date.'),
-    body('check_out').notEmpty().withMessage('check_out must be a valid date.'),
+    // check_out is required for per_night, optional for short_time (server computes it)
+    body('check_out').custom((value, { req }) => {
+      if (req.body.booking_type !== 'short_time' && !value) {
+        throw new Error('check_out must be a valid date.');
+      }
+      return true;
+    }),
+    // Short-time specific validations
+    body('check_in_time').if(body('booking_type').equals('short_time'))
+      .notEmpty().withMessage('Check-in time is required for short-time bookings.'),
+    body('duration_hours').if(body('booking_type').equals('short_time'))
+      .isInt({ min: 1, max: 3 }).withMessage('Duration must be between 1 and 3 hours.'),
   ],
   validate, svc.createBooking
 );

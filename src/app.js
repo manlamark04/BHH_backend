@@ -13,6 +13,7 @@ const bookingRoutes   = require('./routes/bookings.routes');
 const billingRoutes   = require('./routes/billing.routes');
 const reportRoutes      = require('./routes/reports.routes');
 const motorcycleRoutes  = require('./routes/motorcycle.routes');
+const courtRoutes       = require('./routes/courts.routes');
 const auditRoutes       = require('./routes/audit.routes');
 
 const app = express();
@@ -37,6 +38,7 @@ app.use('/api/rooms',       roomRoutes);
 app.use('/api/services',    serviceRoutes);
 app.use('/api/activities',  activityRoutes);
 app.use('/api/motorcycles', motorcycleRoutes);
+app.use('/api/courts',      courtRoutes);
 app.use('/api/bookings',    bookingRoutes);
 app.use('/api/bills',       billingRoutes);
 app.use('/api/reports',     reportRoutes);

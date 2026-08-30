@@ -228,12 +228,50 @@ async function getMe(req, res) {
  * PUT /api/auth/profile
  */
 async function updateProfile(req, res) {
+  const pool = require('../config/db');
   try {
-    const { full_name, phone } = req.body;
-    const user = await db.auth.updateProfile(req.user.id, full_name, phone);
+    const { first_name, middle_name, last_name, full_name, phone, gender, address, civil_status, dob } = req.body;
+    
+    // Auto-compute full_name if first_name / last_name provided
+    let computedFullName = full_name;
+    if (first_name || last_name) {
+      computedFullName = [first_name, middle_name, last_name].filter(Boolean).join(' ').trim();
+    }
+
+    await pool.query(`
+      UPDATE users
+      SET 
+        first_name = COALESCE(?, first_name),
+        middle_name = COALESCE(?, middle_name),
+        last_name = COALESCE(?, last_name),
+        full_name = COALESCE(?, full_name),
+        phone = COALESCE(?, phone),
+        gender = COALESCE(?, gender),
+        address = COALESCE(?, address),
+        civil_status = COALESCE(?, civil_status),
+        dob = COALESCE(?, dob),
+        updated_at = NOW()
+      WHERE id = ?
+    `, [
+      first_name !== undefined ? (first_name ? first_name.trim() : null) : null,
+      middle_name !== undefined ? (middle_name ? middle_name.trim() : null) : null,
+      last_name !== undefined ? (last_name ? last_name.trim() : null) : null,
+      computedFullName !== undefined ? (computedFullName ? computedFullName.trim() : null) : null,
+      phone !== undefined ? (phone ? phone.trim() : null) : null,
+      gender !== undefined ? (gender ? gender.trim() : null) : null,
+      address !== undefined ? (address ? address.trim() : null) : null,
+      civil_status !== undefined ? (civil_status ? civil_status.trim() : null) : null,
+      dob !== undefined ? (dob ? dob.trim() : null) : null,
+      req.user.id
+    ]);
+
+    const [userRows] = await pool.query('SELECT * FROM users WHERE id = ?', [req.user.id]);
+    const user = userRows[0];
     const { password_hash, ...safeUser } = user;
+    safeUser.must_change_password = Boolean(safeUser.must_change_password);
     res.json(safeUser);
   } catch (err) {
+    console.error('updateProfile error:', err);
     res.status(500).json({ message: err.message });
   }
 }

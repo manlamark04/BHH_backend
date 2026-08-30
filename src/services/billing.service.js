@@ -34,18 +34,26 @@ async function getAllBills(req, res) {
         u.phone AS customer_phone,
         b.booking_id,
         bk.status AS booking_status,
+        bk.booking_type,
+        bk.check_in_time,
+        bk.duration_hours,
         bk.check_in,
         bk.check_out,
+        bk.cancellation_fee AS booking_cancellation_fee,
         r.room_number,
         r.room_type,
         b.activity_rental_id,
+        ar.status AS activity_status,
         ar.start_time AS activity_start_time,
         ar.end_time AS activity_end_time,
         act.name AS activity_name,
         act.price_per_unit AS activity_rate,
+        b.motor_rental_id,
+        mr.status AS motor_status,
         bli.line_items_summary,
         b.total_amount,
         b.paid_amount,
+        b.cancellation_fee,
         b.status,
         b.issued_by,
         s.full_name AS staff_name,
@@ -57,6 +65,7 @@ async function getAllBills(req, res) {
       LEFT JOIN rooms r ON r.id = bk.room_id
       LEFT JOIN activity_rentals ar ON ar.id = b.activity_rental_id
       LEFT JOIN activities act ON act.id = ar.activity_id
+      LEFT JOIN motor_rentals mr ON mr.id = b.motor_rental_id
       LEFT JOIN (
         SELECT bill_id, GROUP_CONCAT(description SEPARATOR ' | ') AS line_items_summary
         FROM bill_line_items
@@ -100,20 +109,36 @@ async function getAllBills(req, res) {
       const validPayments = billPayments.filter((p) => !p.is_refunded);
       const computedPaid = validPayments.reduce((sum, p) => sum + Number(p.amount || 0), 0);
       const totalAmount = Number(b.total_amount || 0);
-      let remainingBalance = Math.max(0, totalAmount - computedPaid);
 
+      const isCancelledBooking = ['cancelled', 'rejected'].includes(String(b.booking_status || '').toLowerCase());
+      const isCancelledActivity = ['cancelled', 'rejected'].includes(String(b.activity_status || '').toLowerCase());
+      const isCancelledMotor = ['cancelled', 'rejected'].includes(String(b.motor_status || '').toLowerCase());
+      const isCancelledBill = ['cancelled', 'void'].includes(String(b.status || '').toLowerCase());
+      const isCancelled = isCancelledBooking || isCancelledActivity || isCancelledMotor || isCancelledBill;
+
+      const cancellationFee = Number(b.cancellation_fee ?? b.booking_cancellation_fee ?? 0);
+      let remainingBalance = 0;
       let status = String(b.status || '').toUpperCase();
-      if (status === 'CANCELLED' || status === 'VOID') {
+
+      if (isCancelled) {
         status = 'CANCELLED';
-        remainingBalance = 0;
+        if (cancellationFee > 0) {
+          remainingBalance = Math.max(0, cancellationFee - computedPaid);
+        } else {
+          remainingBalance = 0;
+        }
       } else if (computedPaid >= totalAmount && totalAmount > 0) {
         status = 'PAID';
+        remainingBalance = 0;
       } else if (computedPaid > 0) {
         status = 'PARTIALLY PAID';
+        remainingBalance = Math.max(0, totalAmount - computedPaid);
       } else if (billPayments.some((p) => p.is_refunded) && computedPaid === 0) {
         status = 'REFUNDED';
+        remainingBalance = 0;
       } else {
         status = 'PENDING';
+        remainingBalance = Math.max(0, totalAmount - computedPaid);
       }
 
       // Invoice number format INV-YYYY-XXXX
@@ -136,7 +161,12 @@ async function getAllBills(req, res) {
       if (b.booking_id) {
         serviceType = 'Room Booking';
         serviceName = b.room_type ? `${b.room_type}` : 'Room Accommodation';
-        serviceDetails = b.room_number ? `Room ${b.room_number}` : (b.check_in ? `${String(b.check_in).substring(0, 10)} → ${String(b.check_out).substring(0, 10)}` : 'Room Stay');
+        if (b.booking_type === 'short_time') {
+          serviceDetails = `Room ${b.room_number || ''} · Short Time (${b.duration_hours || 3} Hours / Per Hour)`;
+        } else {
+          const nights = Math.max(1, Math.ceil((new Date(b.check_out) - new Date(b.check_in)) / (1000 * 60 * 60 * 24))) || 1;
+          serviceDetails = `Room ${b.room_number || ''} · Per Night (${nights} ${nights === 1 ? 'Night' : 'Nights'})`;
+        }
       } else if (b.activity_rental_id || (b.activity_name && String(b.activity_name).toLowerCase().includes('pickleball'))) {
         serviceType = 'Pickleball Court';
         serviceName = b.activity_name || 'Pickleball Court Reservation';
@@ -166,6 +196,9 @@ async function getAllBills(req, res) {
         booking_id: b.booking_id,
         booking_ref: bookingRef,
         booking_status: b.booking_status,
+        booking_type: b.booking_type,
+        check_in_time: b.check_in_time,
+        duration_hours: b.duration_hours,
         room_number: b.room_number,
         room_type: b.room_type,
         check_in: b.check_in,
@@ -224,8 +257,10 @@ async function getMyBills(req, res) {
         b.customer_id,
         b.booking_id,
         b.activity_rental_id,
+        b.motor_rental_id,
         b.total_amount,
         b.paid_amount,
+        b.cancellation_fee,
         b.status,
         b.issued_at,
         u.full_name AS customer_name,
@@ -233,13 +268,19 @@ async function getMyBills(req, res) {
         u.email AS customer_email,
         u.phone AS customer_phone,
         bk.status AS booking_status,
+        bk.booking_type,
+        bk.check_in_time,
+        bk.duration_hours,
         bk.check_in,
         bk.check_out,
+        bk.cancellation_fee AS booking_cancellation_fee,
         r.room_number,
         r.room_type,
         a.name AS activity_name,
+        ar.status AS activity_status,
         ar.start_time AS activity_start_time,
         ar.end_time AS activity_end_time,
+        mr.status AS motor_status,
         items.line_items_summary
       FROM bills b
       LEFT JOIN users u ON u.id = b.customer_id
@@ -247,6 +288,7 @@ async function getMyBills(req, res) {
       LEFT JOIN rooms r ON r.id = bk.room_id
       LEFT JOIN activity_rentals ar ON ar.id = b.activity_rental_id
       LEFT JOIN activities a ON a.id = ar.activity_id
+      LEFT JOIN motor_rentals mr ON mr.id = b.motor_rental_id
       LEFT JOIN (
         SELECT bill_id, GROUP_CONCAT(CONCAT(description, ' (x', quantity, ')') SEPARATOR ', ') AS line_items_summary
         FROM bill_line_items
@@ -286,19 +328,36 @@ async function getMyBills(req, res) {
       const validPayments = billPayments.filter((p) => !p.is_refunded);
       const computedPaid = validPayments.reduce((sum, p) => sum + Number(p.amount || 0), 0);
       const totalAmount = Number(b.total_amount || 0);
-      const remainingBalance = Math.max(0, totalAmount - computedPaid);
 
+      const isCancelledBooking = ['cancelled', 'rejected'].includes(String(b.booking_status || '').toLowerCase());
+      const isCancelledActivity = ['cancelled', 'rejected'].includes(String(b.activity_status || '').toLowerCase());
+      const isCancelledMotor = ['cancelled', 'rejected'].includes(String(b.motor_status || '').toLowerCase());
+      const isCancelledBill = ['cancelled', 'void'].includes(String(b.status || '').toLowerCase());
+      const isCancelled = isCancelledBooking || isCancelledActivity || isCancelledMotor || isCancelledBill;
+
+      const cancellationFee = Number(b.cancellation_fee ?? b.booking_cancellation_fee ?? 0);
+      let remainingBalance = 0;
       let status = String(b.status || '').toUpperCase();
-      if (status === 'CANCELLED' || status === 'VOID') {
+
+      if (isCancelled) {
         status = 'CANCELLED';
+        if (cancellationFee > 0) {
+          remainingBalance = Math.max(0, cancellationFee - computedPaid);
+        } else {
+          remainingBalance = 0;
+        }
       } else if (computedPaid >= totalAmount && totalAmount > 0) {
         status = 'PAID';
+        remainingBalance = 0;
       } else if (computedPaid > 0) {
         status = 'PARTIALLY PAID';
+        remainingBalance = Math.max(0, totalAmount - computedPaid);
       } else if (billPayments.some((p) => p.is_refunded) && computedPaid === 0) {
         status = 'REFUNDED';
+        remainingBalance = 0;
       } else {
         status = 'UNPAID';
+        remainingBalance = Math.max(0, totalAmount - computedPaid);
       }
 
       const invoiceNumber = b.bill_number && b.bill_number.startsWith('INV-')
@@ -316,7 +375,12 @@ async function getMyBills(req, res) {
       if (b.booking_id) {
         serviceType = 'Room Booking';
         serviceName = b.room_type || 'Room Accommodation';
-        serviceDetails = b.room_number ? `Room ${b.room_number}` : 'Room Stay';
+        if (b.booking_type === 'short_time') {
+          serviceDetails = `Room ${b.room_number || ''} · Short Time (${b.duration_hours || 3} Hours / Per Hour)`;
+        } else {
+          const nights = Math.max(1, Math.ceil((new Date(b.check_out) - new Date(b.check_in)) / (1000 * 60 * 60 * 24))) || 1;
+          serviceDetails = `Room ${b.room_number || ''} · Per Night (${nights} ${nights === 1 ? 'Night' : 'Nights'})`;
+        }
       } else if (b.activity_rental_id || (b.activity_name && String(b.activity_name).toLowerCase().includes('pickleball'))) {
         serviceType = 'Pickleball Court';
         serviceName = b.activity_name || 'Pickleball Court Reservation';
@@ -342,12 +406,17 @@ async function getMyBills(req, res) {
         customer_id: b.customer_id,
         booking_id: b.booking_id,
         booking_ref: bookingRef,
+        booking_type: b.booking_type,
+        check_in_time: b.check_in_time,
+        duration_hours: b.duration_hours,
         room_number: b.room_number,
         room_type: serviceName,
         service_type: serviceType,
         service_name: serviceName,
         service_details: serviceDetails,
         total_amount: totalAmount,
+        cancellation_fee: cancellationFee,
+        is_cancelled: isCancelled,
         paid_amount: computedPaid,
         amount_paid: computedPaid,
         remaining_balance: remainingBalance,
@@ -524,13 +593,20 @@ async function recordPayment(req, res) {
       console.warn('Bill update warning:', billUpdateErr.message);
     }
 
-    // Automatic check-in promotion for room bookings
+    // Automatic check-in / start match promotion for room bookings and activity rentals
     try {
       if (bill.booking_id) {
         await pool.query("UPDATE bookings SET status = 'checked_in', updated_at = NOW() WHERE id = ?", [bill.booking_id]);
         const [bkRows] = await pool.query("SELECT room_id FROM bookings WHERE id = ?", [bill.booking_id]);
         if (bkRows.length > 0 && bkRows[0].room_id) {
           await pool.query("UPDATE rooms SET status = 'occupied', updated_at = NOW() WHERE id = ?", [bkRows[0].room_id]);
+        }
+      } else if (bill.activity_rental_id) {
+        await pool.query("UPDATE activity_rentals SET status = 'active', approved_by = ?, approved_at = NOW(), updated_at = NOW() WHERE id = ?", [req.user.id || null, bill.activity_rental_id]);
+      } else if (bill.bill_number && (bill.bill_number.includes('BILL-ACT') || bill.bill_number.includes('AR-'))) {
+        const [actRows] = await pool.query("SELECT id FROM activity_rentals WHERE customer_id = ? AND status IN ('pending_payment', 'pending_approval', 'pending', 'confirmed', 'approved') ORDER BY id DESC LIMIT 1", [bill.customer_id]);
+        if (actRows.length > 0) {
+          await pool.query("UPDATE activity_rentals SET status = 'active', approved_by = ?, approved_at = NOW(), updated_at = NOW() WHERE id = ?", [req.user.id || null, actRows[0].id]);
         }
       } else if (bill.customer_id) {
         const [activeBkRows] = await pool.query(
@@ -545,10 +621,10 @@ async function recordPayment(req, res) {
         }
       }
     } catch (checkInErr) {
-      console.warn('Auto check-in warning:', checkInErr.message);
+      console.warn('Auto check-in / start match warning:', checkInErr.message);
     }
 
-    // Trigger request lifecycle state machine promotion to pending_approval if gate is satisfied
+    // Trigger request lifecycle state machine promotion if gate is satisfied
     try {
       const requestLifecycle = require('./request-lifecycle.service');
       const payMeta = { userId: req.user.id, userName: req.user.full_name || req.user.username };

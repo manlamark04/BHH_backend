@@ -48,8 +48,15 @@ router.get('/me', authenticate, svc.getMe);
 router.put('/profile',
   authenticate,
   [
-    body('full_name').trim().notEmpty().withMessage('Full name is required.'),
+    body('first_name').optional().trim(),
+    body('middle_name').optional().trim(),
+    body('last_name').optional().trim(),
+    body('full_name').optional().trim(),
     body('phone').optional().trim(),
+    body('gender').optional().trim(),
+    body('address').optional().trim(),
+    body('civil_status').optional().trim(),
+    body('dob').optional().trim(),
   ],
   validate, svc.updateProfile
 );

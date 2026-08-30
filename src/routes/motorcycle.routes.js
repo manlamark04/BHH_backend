@@ -84,6 +84,17 @@ router.put('/:id',
   svc.updateMotorcycle
 );
 
+// Staff/Admin: Quick Update motorcycle status only
+router.patch('/:id/status',
+  authenticate,
+  requireRole('staff', 'admin'),
+  [
+    body('status').trim().notEmpty().withMessage('Status is required.'),
+  ],
+  validate,
+  svc.updateMotorcycleStatus
+);
+
 // Get single motorcycle (Keep last to avoid route collision)
 router.get('/:id', svc.getMotorcycleById);
 
