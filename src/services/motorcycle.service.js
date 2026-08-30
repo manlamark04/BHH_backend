@@ -163,7 +163,7 @@ async function getMotorcycleById(req, res) {
 /** POST /api/motorcycles — Admin: Add motorcycle to fleet */
 async function createMotorcycle(req, res) {
   try {
-    const { brand, model, type, plate_number, rental_rate, rate_type, description, image_url, status } = req.body;
+    const { brand, model, type, plate_number, rental_rate, late_fee_hourly_rate, rate_type, description, image_url, status } = req.body;
 
     if (!brand || !model || !type || !plate_number || !rental_rate) {
       return res.status(400).json({ message: 'Brand, model, type, plate number, and rental rate are required.' });
@@ -183,8 +183,8 @@ async function createMotorcycle(req, res) {
 
     const [result] = await pool.query(
       `INSERT INTO motorcycles 
-        (motor_id, brand, model, type, plate_number, rental_rate, rate_type, description, image_url, status)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        (motor_id, brand, model, type, plate_number, rental_rate, late_fee_hourly_rate, rate_type, description, image_url, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         motorId,
         brand.trim(),
@@ -192,6 +192,7 @@ async function createMotorcycle(req, res) {
         type.trim(),
         plate_number.trim().toUpperCase(),
         parseFloat(rental_rate),
+        late_fee_hourly_rate !== undefined && late_fee_hourly_rate !== null && late_fee_hourly_rate !== '' ? parseFloat(late_fee_hourly_rate) : null,
         rate_type || 'daily',
         description || null,
         processedImageUrl,
@@ -209,7 +210,7 @@ async function createMotorcycle(req, res) {
 /** PUT /api/motorcycles/:id — Admin: Update motorcycle details */
 async function updateMotorcycle(req, res) {
   try {
-    const { brand, model, type, plate_number, rental_rate, rate_type, description, image_url, status } = req.body;
+    const { brand, model, type, plate_number, rental_rate, late_fee_hourly_rate, rate_type, description, image_url, status } = req.body;
     const motorId = req.params.id;
 
     // 1. Verify motorcycle exists
@@ -232,6 +233,10 @@ async function updateMotorcycle(req, res) {
     // 3. Process base64 image if uploaded
     const processedImageUrl = image_url !== undefined ? saveBase64Image(image_url, `motor-${motorId}`) : undefined;
 
+    const parsedLateRate = late_fee_hourly_rate !== undefined
+      ? (late_fee_hourly_rate !== null && late_fee_hourly_rate !== '' ? parseFloat(late_fee_hourly_rate) : null)
+      : undefined;
+
     // 4. Update fields
     await pool.query(
       `UPDATE motorcycles 
@@ -240,6 +245,7 @@ async function updateMotorcycle(req, res) {
            type = COALESCE(?, type),
            plate_number = COALESCE(?, plate_number),
            rental_rate = COALESCE(?, rental_rate),
+           late_fee_hourly_rate = ${parsedLateRate !== undefined ? '?' : 'late_fee_hourly_rate'},
            rate_type = COALESCE(?, rate_type),
            description = COALESCE(?, description),
            image_url = COALESCE(?, image_url),
@@ -252,6 +258,7 @@ async function updateMotorcycle(req, res) {
         type ? type.trim() : null,
         plate_number ? plate_number.trim().toUpperCase() : null,
         rental_rate !== undefined && rental_rate !== null ? parseFloat(rental_rate) : null,
+        ...(parsedLateRate !== undefined ? [parsedLateRate] : []),
         rate_type || null,
         description !== undefined ? description : null,
         processedImageUrl !== undefined ? processedImageUrl : null,
@@ -695,10 +702,10 @@ async function processMotorReturn(req, res) {
     const targetRentalId = req.params.id;
     const staffId = req.user.id;
     const staffName = req.user.full_name || req.user.username;
-    const { condition, remarks, maintenance_needed } = req.body;
+    const { condition, remarks, maintenance_needed, waive_late_fee, late_fee_override, waiver_reason } = req.body;
 
     const [rentalRows] = await conn.query(
-      `SELECT mr.*, m.rental_rate, m.rate_type, m.plate_number, m.brand, m.model 
+      `SELECT mr.*, m.rental_rate, m.rate_type, m.late_fee_hourly_rate, m.plate_number, m.brand, m.model 
        FROM motor_rentals mr
        JOIN motorcycles m ON mr.motor_id = m.id
        WHERE (mr.id = ? OR mr.rental_id = ?) AND mr.status IN ('ACTIVE', 'OVERDUE', 'RESERVED')`,
@@ -713,18 +720,34 @@ async function processMotorReturn(req, res) {
     const actualReturnTime = new Date();
     const expectedReturnTime = new Date(rental.expected_return_datetime);
 
-    // Calculate late fee if returned after expected return date/time
+    // Determine hourly late rate:
+    // 1. Motorcycle specific late_fee_hourly_rate if configured
+    // 2. If hourly rental: 1.5x hourly rate
+    // 3. Fallback for daily rental: 1.5x daily rate / 24, with minimum ₱100/hr
+    let hourlyLateRate = 100.00;
+    if (rental.late_fee_hourly_rate !== null && rental.late_fee_hourly_rate !== undefined && parseFloat(rental.late_fee_hourly_rate) > 0) {
+      hourlyLateRate = parseFloat(rental.late_fee_hourly_rate);
+    } else if (rental.rate_type === 'hourly' && parseFloat(rental.rental_rate) > 0) {
+      hourlyLateRate = Math.round(parseFloat(rental.rental_rate) * 1.5);
+    } else if (parseFloat(rental.rental_rate) > 0) {
+      hourlyLateRate = Math.max(100, Math.round((parseFloat(rental.rental_rate) / 24) * 1.5));
+    }
+
     let lateFee = 0;
-    let lateHours = 0;
+    let hoursLate = 0;
+    const isWaived = Boolean(waive_late_fee);
+    const waiverReason = isWaived ? (waiver_reason || remarks || 'Staff waiver granted') : null;
+
     if (actualReturnTime > expectedReturnTime) {
       const lateDiffMs = actualReturnTime.getTime() - expectedReturnTime.getTime();
-      if (rental.rate_type === 'hourly') {
-        lateHours = Math.ceil(lateDiffMs / (1000 * 60 * 60));
-        lateFee = lateHours * parseFloat(rental.rate);
+      hoursLate = Math.max(0, Math.ceil(lateDiffMs / (1000 * 60 * 60)));
+      
+      if (isWaived) {
+        lateFee = 0;
+      } else if (late_fee_override !== undefined && late_fee_override !== null && !isNaN(parseFloat(late_fee_override))) {
+        lateFee = Math.max(0, parseFloat(late_fee_override));
       } else {
-        // Daily: charge 1 full day for each overdue 24h or fraction
-        const lateDays = Math.ceil(lateDiffMs / (1000 * 60 * 60 * 24));
-        lateFee = lateDays * parseFloat(rental.rate);
+        lateFee = hoursLate * hourlyLateRate;
       }
     }
 
@@ -739,11 +762,15 @@ async function processMotorReturn(req, res) {
        SET status = 'COMPLETED',
            actual_return_datetime = ?,
            late_fee = ?,
+           hours_late = ?,
+           hourly_late_rate = ?,
+           late_fee_waived = ?,
+           late_fee_waiver_reason = ?,
            final_amount = ?,
            returned_by = ?,
            updated_at = NOW()
        WHERE id = ?`,
-      [actualReturnTime, lateFee, finalAmount, staffId, rental.id]
+      [actualReturnTime, lateFee, hoursLate, hourlyLateRate, isWaived, waiverReason, finalAmount, staffId, rental.id]
     );
 
     // 2. Update motorcycle status to AVAILABLE (or MAINTENANCE)
@@ -755,7 +782,11 @@ async function processMotorReturn(req, res) {
     // 3. Create Audit Log
     const returnRemarks = [
       remarks || 'Motorcycle returned in good order.',
-      lateFee > 0 ? `Late return fee applied: ₱${lateFee.toLocaleString()}` : null,
+      isWaived
+        ? `Late fee waived (${hoursLate} hrs overdue) — Reason: ${waiverReason}`
+        : lateFee > 0
+        ? `Late return penalty applied: ₱${lateFee.toLocaleString()} (${hoursLate} hr${hoursLate > 1 ? 's' : ''} late × ₱${hourlyLateRate}/hr)`
+        : null,
       maintenance_needed ? 'Motorcycle routed to MAINTENANCE.' : 'Motorcycle status set to AVAILABLE.',
     ].filter(Boolean).join(' | ');
 
@@ -783,7 +814,10 @@ async function processMotorReturn(req, res) {
     res.json({
       message: 'Motorcycle return processed successfully!',
       rental: completedRows[0],
+      hours_late: hoursLate,
+      hourly_late_rate: hourlyLateRate,
       late_fee: lateFee,
+      late_fee_waived: isWaived,
       final_amount: finalAmount,
       motorcycle_status: nextMotorStatus,
     });

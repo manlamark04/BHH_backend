@@ -96,7 +96,7 @@ async function checkPaymentGate(entityType, entityId) {
   let payments = [];
   if (billId) {
     const [pRows] = await pool.query(`
-      SELECT p.*, u.full_name AS staff_name
+      SELECT p.id, p.amount, p.method, p.paid_at, p.notes, p.receipt_number, u.full_name AS staff_name
       FROM payments p
       LEFT JOIN users u ON u.id = p.received_by
       WHERE p.bill_id = ? AND (p.notes IS NULL OR p.notes NOT LIKE '%[REFUNDED%')
@@ -128,7 +128,7 @@ async function checkPaymentGate(entityType, entityId) {
       amount: Number(latestPayment.amount),
       method: latestPayment.method,
       paid_at: latestPayment.paid_at,
-      txn_number: `TXN-${new Date(latestPayment.paid_at).getFullYear()}-${String(latestPayment.id).padStart(6, '0')}`,
+      receipt_number: latestPayment.receipt_number || '—',
       staff_name: latestPayment.staff_name || 'Front Desk',
       notes: latestPayment.notes,
     } : null,

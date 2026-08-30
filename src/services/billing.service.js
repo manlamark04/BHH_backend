@@ -1,4 +1,5 @@
 const pool = require('../config/db');
+const { getUniqueReceiptNumber } = require('../utils/receipt.util');
 
 function formatActivityHours(startVal, endVal) {
   if (!startVal || !endVal) return '1 hr Match Play';
@@ -28,12 +29,24 @@ async function getAllBills(req, res) {
         b.id,
         b.bill_number,
         b.customer_id,
+        b.booking_id,
+        b.activity_rental_id,
+        b.motor_rental_id,
+        b.total_amount,
+        b.paid_amount,
+        b.status,
+        b.cancellation_fee,
+        b.receipt_number,
+        b.issued_by,
+        b.issued_at,
         u.full_name AS customer_name,
+        u.username AS customer_username,
         u.unique_id AS customer_code,
         u.email AS customer_email,
         u.phone AS customer_phone,
-        b.booking_id,
+        su.full_name AS staff_name,
         bk.status AS booking_status,
+        bk.room_id,
         bk.booking_type,
         bk.check_in_time,
         bk.duration_hours,
@@ -42,29 +55,20 @@ async function getAllBills(req, res) {
         bk.cancellation_fee AS booking_cancellation_fee,
         r.room_number,
         r.room_type,
-        b.activity_rental_id,
         ar.status AS activity_status,
+        a.name AS activity_name,
         ar.start_time AS activity_start_time,
         ar.end_time AS activity_end_time,
-        act.name AS activity_name,
-        act.price_per_unit AS activity_rate,
-        b.motor_rental_id,
         mr.status AS motor_status,
-        bli.line_items_summary,
-        b.total_amount,
-        b.paid_amount,
-        b.cancellation_fee,
-        b.status,
-        b.issued_by,
-        s.full_name AS staff_name,
-        b.issued_at
+        mr.rental_id AS motor_rental_code,
+        bli.line_items_summary
       FROM bills b
-      JOIN users u ON u.id = b.customer_id
-      LEFT JOIN users s ON s.id = b.issued_by
+      LEFT JOIN users u ON u.id = b.customer_id
+      LEFT JOIN users su ON su.id = b.issued_by
       LEFT JOIN bookings bk ON bk.id = b.booking_id
       LEFT JOIN rooms r ON r.id = bk.room_id
       LEFT JOIN activity_rentals ar ON ar.id = b.activity_rental_id
-      LEFT JOIN activities act ON act.id = ar.activity_id
+      LEFT JOIN activities a ON a.id = ar.activity_id
       LEFT JOIN motor_rentals mr ON mr.id = b.motor_rental_id
       LEFT JOIN (
         SELECT bill_id, GROUP_CONCAT(description SEPARATOR ' | ') AS line_items_summary
@@ -84,6 +88,7 @@ async function getAllBills(req, res) {
         p.received_by,
         pu.full_name AS staff_name,
         p.notes,
+        p.receipt_number,
         p.paid_at
       FROM payments p
       LEFT JOIN users pu ON pu.id = p.received_by
@@ -97,7 +102,7 @@ async function getAllBills(req, res) {
       const isRefunded = String(p.notes || '').includes('[REFUNDED');
       paymentsByBill[p.bill_id].push({
         ...p,
-        txn_number: `TXN-${new Date(p.paid_at || Date.now()).getFullYear()}-${String(p.id).padStart(6, '0')}`,
+        receipt_number: p.receipt_number || '—',
         is_refunded: isRefunded,
       });
     }
@@ -218,6 +223,7 @@ async function getAllBills(req, res) {
         method: method,
         issued_by_name: b.staff_name || 'System Administrator',
         issued_at: b.issued_at,
+        receipt_number: validPayments.length > 0 ? (validPayments[0].receipt_number || '—') : (b.receipt_number || '—'),
         payments: billPayments,
       };
     });
@@ -235,7 +241,8 @@ async function getAllBills(req, res) {
         (b.customer_name && b.customer_name.toLowerCase().includes(q)) ||
         (b.customer_code && b.customer_code.toLowerCase().includes(q)) ||
         (b.room_number && b.room_number.toLowerCase().includes(q)) ||
-        (b.method && b.method.toLowerCase().includes(q))
+        (b.method && b.method.toLowerCase().includes(q)) ||
+        (b.receipt_number && b.receipt_number.toLowerCase().includes(q))
       );
     }
 
@@ -261,6 +268,7 @@ async function getMyBills(req, res) {
         b.total_amount,
         b.paid_amount,
         b.cancellation_fee,
+        b.receipt_number,
         b.status,
         b.issued_at,
         u.full_name AS customer_name,
@@ -304,7 +312,7 @@ async function getMyBills(req, res) {
 
     const billIds = bills.map((b) => b.id);
     const [paymentsRows] = await pool.query(`
-      SELECT p.bill_id, p.amount, p.method, p.notes, p.paid_at, p.id
+      SELECT p.bill_id, p.amount, p.method, p.notes, p.receipt_number, p.paid_at, p.id
       FROM payments p
       WHERE p.bill_id IN (?)
       ORDER BY p.paid_at DESC
@@ -317,6 +325,7 @@ async function getMyBills(req, res) {
       paymentsByBill[p.bill_id].push({
         ...p,
         txn_number: `TXN-${new Date(p.paid_at || Date.now()).getFullYear()}-${String(p.id).padStart(6, '0')}`,
+        receipt_number: p.receipt_number || '—',
         is_refunded: isRefunded,
       });
     }
@@ -424,6 +433,7 @@ async function getMyBills(req, res) {
         status: status,
         payment_status: status,
         method: method,
+        receipt_number: validPayments.length > 0 ? (validPayments[0].receipt_number || '—') : (b.receipt_number || '—'),
         issued_at: b.issued_at,
         created_at: b.issued_at,
         payments: billPayments,
@@ -459,6 +469,7 @@ async function getBillPayments(req, res) {
         p.received_by,
         u.full_name AS staff_name,
         p.notes,
+        p.receipt_number,
         p.paid_at
       FROM payments p
       LEFT JOIN users u ON u.id = p.received_by
@@ -514,37 +525,20 @@ async function generateBill(req, res) {
 async function recordPayment(req, res) {
   try {
     const { bill_id, booking_id, amount, method, notes, ref_number } = req.body;
+    const MAX_PAYMENT_CAP = 1000000;
     const numAmount = parseFloat(amount);
 
-    if (!numAmount || numAmount <= 0) {
+    if (isNaN(numAmount) || numAmount <= 0) {
       return res.status(400).json({ message: 'Payment amount must be greater than zero.' });
     }
+    if (numAmount > MAX_PAYMENT_CAP) {
+      return res.status(400).json({ message: 'Payment amount cannot exceed ₱1,000,000.00 per transaction.' });
+    }
 
-    let targetBillId = bill_id;
-
-    // If booking_id provided without bill_id, find or generate bill
+    let targetBillId = bill_id ? parseInt(bill_id) : null;
     if (!targetBillId && booking_id) {
-      const [existingBills] = await pool.query('SELECT * FROM bills WHERE booking_id = ?', [booking_id]);
-      if (existingBills.length > 0) {
-        targetBillId = existingBills[0].id;
-      } else {
-        // Calculate booking total
-        const [bkRows] = await pool.query('SELECT * FROM bookings WHERE id = ?', [booking_id]);
-        if (bkRows.length === 0) return res.status(404).json({ message: 'Booking not found.' });
-        const bk = bkRows[0];
-        const [rmRows] = await pool.query('SELECT rate_per_night FROM rooms WHERE id = ?', [bk.room_id]);
-        const nights = Math.max(1, Math.ceil((new Date(bk.check_out) - new Date(bk.check_in)) / (1000 * 60 * 60 * 24)));
-        const total = Number(rmRows[0]?.rate_per_night || 0) * nights;
-
-        const currentYear = new Date().getFullYear();
-        const billNumber = `INV-${currentYear}-${String(booking_id).padStart(4, '0')}`;
-
-        const [createdBill] = await pool.query(`
-          INSERT INTO bills (bill_number, customer_id, booking_id, total_amount, paid_amount, status, issued_by, issued_at)
-          VALUES (?, ?, ?, ?, 0, 'unpaid', ?, NOW())
-        `, [billNumber, bk.customer_id, booking_id, total, req.user.id]);
-        targetBillId = createdBill.insertId;
-      }
+      const [bkBill] = await pool.query('SELECT id FROM bills WHERE booking_id = ? ORDER BY id DESC LIMIT 1', [booking_id]);
+      if (bkBill.length > 0) targetBillId = bkBill[0].id;
     }
 
     if (!targetBillId) {
@@ -572,21 +566,25 @@ async function recordPayment(req, res) {
 
     const fullNotes = [ref_number ? `Ref: ${ref_number}` : '', notes || ''].filter(Boolean).join(' · ');
 
+    // Generate guaranteed unique 6-char LLLDDD Official Receipt Number (e.g. OR-KJD482)
+    const receiptNumber = await getUniqueReceiptNumber(pool);
+
     const [insertResult] = await pool.query(`
-      INSERT INTO payments (bill_id, amount, method, received_by, notes, paid_at)
-      VALUES (?, ?, ?, ?, ?, NOW())
-    `, [targetBillId, numAmount, normMethod, req.user.id, fullNotes || null]);
+      INSERT INTO payments (bill_id, amount, method, received_by, notes, receipt_number, paid_at)
+      VALUES (?, ?, ?, ?, ?, ?, NOW())
+    `, [targetBillId, numAmount, normMethod, req.user.id, fullNotes || null, receiptNumber]);
 
     const newPaymentId = insertResult.insertId;
     const newTotalPaid = previousPaid + numAmount;
     const newRemaining = Math.max(0, totalAmount - newTotalPaid);
     const newStatus = newTotalPaid >= totalAmount ? 'paid' : (newTotalPaid > 0 ? 'partially_paid' : 'unpaid');
 
-    // Persist paid amount and status to bills table
+    // Persist paid amount, status, and receipt number to bills table
     try {
-      await pool.query('UPDATE bills SET paid_amount = ?, status = ?, updated_at = NOW() WHERE id = ?', [
+      await pool.query('UPDATE bills SET paid_amount = ?, status = ?, receipt_number = ?, updated_at = NOW() WHERE id = ?', [
         newTotalPaid,
         newStatus,
+        receiptNumber,
         targetBillId,
       ]);
     } catch (billUpdateErr) {
@@ -646,13 +644,52 @@ async function recordPayment(req, res) {
       console.warn('Lifecycle transition check warning:', lcErr.message);
     }
 
+    let customerName = 'Guest';
+    let customerEmail = undefined;
+    let customerPhone = undefined;
+
+    if (bill.customer_id) {
+      try {
+        const [custRows] = await pool.query('SELECT full_name, email, phone FROM users WHERE id = ?', [bill.customer_id]);
+        if (custRows.length > 0) {
+          customerName = custRows[0].full_name || 'Guest';
+          customerEmail = custRows[0].email;
+          customerPhone = custRows[0].phone;
+        }
+      } catch (_) {}
+    }
+
+    const staffName = req.user.full_name || req.user.username || 'Front Desk Staff';
+    const invoiceNumber = bill.bill_number && bill.bill_number.startsWith('INV-')
+      ? bill.bill_number
+      : (bill.bill_number ? bill.bill_number : `INV-${new Date(bill.issued_at || Date.now()).getFullYear()}-${String(bill.id).padStart(4, '0')}`);
+
     res.status(201).json({
       message: 'Payment successfully recorded.',
       payment_id: newPaymentId,
-      txn_number: `TXN-${new Date().getFullYear()}-${String(newPaymentId).padStart(6, '0')}`,
+      receipt_number: receiptNumber,
       total_paid: newTotalPaid,
       remaining_balance: newRemaining,
       status: newStatus.toUpperCase(),
+      receipt_data: {
+        receipt_number: receiptNumber,
+        invoice_number: invoiceNumber,
+        bill_id: targetBillId,
+        payment_id: newPaymentId,
+        customer_name: customerName,
+        customer_email: customerEmail,
+        customer_phone: customerPhone,
+        total_amount: totalAmount,
+        previous_paid: previousPaid,
+        amount_paid: numAmount,
+        remaining_balance: newRemaining,
+        status: newStatus.toUpperCase(),
+        method: normMethod,
+        ref_number: ref_number || undefined,
+        notes: notes || undefined,
+        staff_name: staffName,
+        paid_at: new Date().toISOString(),
+      }
     });
   } catch (err) {
     console.error('recordPayment error:', err);
