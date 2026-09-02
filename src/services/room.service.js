@@ -42,14 +42,14 @@ async function getRooms(req, res) {
         ) paid_tbl ON paid_tbl.booking_id = b.id
         JOIN rooms rm ON rm.id = b.room_id
         WHERE b.status = 'checked_in'
-           OR (b.status IN ('confirmed', 'pending_approval') AND COALESCE(paid_tbl.total_paid, 0) >= (GREATEST(1, DATEDIFF(b.check_out, b.check_in)) * rm.rate_per_night) AND COALESCE(paid_tbl.total_paid, 0) > 0)
+           OR (b.status = 'confirmed' AND COALESCE(paid_tbl.total_paid, 0) >= (GREATEST(1, DATEDIFF(b.check_out, b.check_in)) * rm.rate_per_night) AND COALESCE(paid_tbl.total_paid, 0) > 0)
       ) occ_bkg ON occ_bkg.room_id = r.id
       LEFT JOIN (
         SELECT 
           b.id, b.room_id, u.full_name AS customer_name, b.check_in, b.check_out
         FROM bookings b
         JOIN users u ON u.id = b.customer_id
-        WHERE b.status NOT IN ('cancelled', 'checked_out', 'rejected')
+        WHERE b.status IN ('confirmed', 'approved')
       ) res_bkg ON res_bkg.room_id = r.id
       WHERE 1=1
     `;

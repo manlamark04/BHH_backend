@@ -53,6 +53,8 @@ async function getAllBills(req, res) {
         bk.check_in,
         bk.check_out,
         bk.cancellation_fee AS booking_cancellation_fee,
+        bk.no_show_fee AS booking_no_show_fee,
+        bk.no_show_at,
         r.room_number,
         r.room_type,
         ar.status AS activity_status,
@@ -69,7 +71,7 @@ async function getAllBills(req, res) {
       LEFT JOIN rooms r ON r.id = bk.room_id
       LEFT JOIN activity_rentals ar ON ar.id = b.activity_rental_id
       LEFT JOIN activities a ON a.id = ar.activity_id
-      LEFT JOIN motor_rentals mr ON mr.id = b.motor_rental_id
+      LEFT JOIN motor_rentals mr ON mr.id = b.motor_rental_id OR (b.motor_rental_id IS NULL AND b.bill_number LIKE CONCAT('BILL-', mr.rental_id))
       LEFT JOIN (
         SELECT bill_id, GROUP_CONCAT(description SEPARATOR ' | ') AS line_items_summary
         FROM bill_line_items
@@ -121,11 +123,26 @@ async function getAllBills(req, res) {
       const isCancelledBill = ['cancelled', 'void'].includes(String(b.status || '').toLowerCase());
       const isCancelled = isCancelledBooking || isCancelledActivity || isCancelledMotor || isCancelledBill;
 
+      const isNoShow = String(b.booking_status || '').toLowerCase() === 'no_show';
+      const noShowFee = Number(b.booking_no_show_fee ?? b.cancellation_fee ?? 0);
+
+      // Pending Approval check: linked reservation is still awaiting staff approval (Rooms only)
+      const isBookingPendingApproval = Boolean(b.booking_id && ['pending_approval', 'pending', 'requested'].includes(String(b.booking_status || '').toLowerCase()));
+      const isActivityPendingApproval = Boolean(b.activity_rental_id && ['pending_approval', 'pending', 'requested'].includes(String(b.activity_status || '').toLowerCase()));
+      const isPendingApproval = !isCancelled && !isNoShow && (isBookingPendingApproval || isActivityPendingApproval);
+
       const cancellationFee = Number(b.cancellation_fee ?? b.booking_cancellation_fee ?? 0);
       let remainingBalance = 0;
       let status = String(b.status || '').toUpperCase();
 
-      if (isCancelled) {
+      if (isNoShow) {
+        status = 'NO_SHOW';
+        if (noShowFee > 0) {
+          remainingBalance = Math.max(0, noShowFee - computedPaid);
+        } else {
+          remainingBalance = 0;
+        }
+      } else if (isCancelled) {
         status = 'CANCELLED';
         if (cancellationFee > 0) {
           remainingBalance = Math.max(0, cancellationFee - computedPaid);
@@ -141,6 +158,10 @@ async function getAllBills(req, res) {
       } else if (billPayments.some((p) => p.is_refunded) && computedPaid === 0) {
         status = 'REFUNDED';
         remainingBalance = 0;
+      } else if (isPendingApproval) {
+        // Enforce "approve first, then bill": when reservation is still pending approval, invoice status is PENDING_APPROVAL
+        status = 'PENDING_APPROVAL';
+        remainingBalance = Math.max(0, totalAmount - computedPaid);
       } else {
         status = 'PENDING';
         remainingBalance = Math.max(0, totalAmount - computedPaid);
@@ -220,6 +241,12 @@ async function getAllBills(req, res) {
         balance: remainingBalance,
         status: status,
         payment_status: status,
+        is_no_show: isNoShow,
+        no_show_fee: noShowFee,
+        no_show_at: b.no_show_at,
+        is_pending_approval: isPendingApproval,
+        approval_gated: isPendingApproval,
+        can_pay: !isCancelled && !isPendingApproval && remainingBalance > 0,
         method: method,
         issued_by_name: b.staff_name || 'System Administrator',
         issued_at: b.issued_at,
@@ -549,6 +576,16 @@ async function recordPayment(req, res) {
     if (bRows.length === 0) return res.status(404).json({ message: 'Bill not found.' });
     const bill = bRows[0];
 
+    // Enforce "approve first, then bill": block payment if room reservation is still in pending approval
+    if (bill.booking_id) {
+      const [bkgRows] = await pool.query('SELECT status FROM bookings WHERE id = ?', [bill.booking_id]);
+      if (bkgRows.length > 0 && ['pending_approval', 'pending', 'requested'].includes(String(bkgRows[0].status || '').toLowerCase())) {
+        return res.status(400).json({
+          message: 'Cannot collect payment for a room reservation that is still pending approval. Please approve the reservation in Pending Approvals first.'
+        });
+      }
+    }
+
     // Compute previous valid payments
     const [paidRows] = await pool.query("SELECT SUM(amount) AS total_paid FROM payments WHERE bill_id = ? AND notes NOT LIKE '%[REFUNDED%'", [targetBillId]);
     const previousPaid = Number(paidRows[0]?.total_paid || 0);
@@ -631,6 +668,8 @@ async function recordPayment(req, res) {
         await requestLifecycle.handlePaymentReceived('booking', bill.booking_id, payMeta);
       } else if (bill.activity_rental_id) {
         await requestLifecycle.handlePaymentReceived('activity_rental', bill.activity_rental_id, payMeta);
+      } else if (bill.motor_rental_id) {
+        await requestLifecycle.handlePaymentReceived('motor_rental', bill.motor_rental_id, payMeta);
       } else if (bill.bill_number && bill.bill_number.includes('MTR-')) {
         const [mrRows] = await pool.query('SELECT id FROM motor_rentals WHERE rental_id LIKE ? OR id = ?', [
           `%${bill.bill_number.replace('BILL-', '')}%`,

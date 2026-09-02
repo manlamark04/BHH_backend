@@ -161,11 +161,15 @@ async function handlePaymentReceived(entityType, entityId, paymentInfo = {}) {
       }
     }
 
-    // If motor rental, ensure motorcycle is marked RENTED
+    // If motor rental, ensure motorcycle is marked RENTED (or RESERVED if future)
     if (entityType === 'motor_rental') {
-      const [mr] = await pool.query('SELECT motor_id FROM motor_rentals WHERE id = ?', [entityId]);
+      const [mr] = await pool.query('SELECT motor_id, start_datetime FROM motor_rentals WHERE id = ?', [entityId]);
       if (mr.length > 0) {
-        await pool.query("UPDATE motorcycles SET status = 'RENTED', updated_at = NOW() WHERE id = ?", [mr[0].motor_id]);
+        const isFuture = new Date(mr[0].start_datetime).getTime() > Date.now();
+        const bikeStatus = isFuture ? 'RESERVED' : 'RENTED';
+        const finalStatus = isFuture ? 'RESERVED' : 'ACTIVE';
+        await pool.query("UPDATE motor_rentals SET status = ? WHERE id = ?", [finalStatus, entityId]);
+        await pool.query("UPDATE motorcycles SET status = ?, updated_at = NOW() WHERE id = ?", [bikeStatus, mr[0].motor_id]);
       }
     }
 
@@ -188,20 +192,13 @@ async function handlePaymentReceived(entityType, entityId, paymentInfo = {}) {
 }
 
 /**
- * Staff manual approve request (with hard server-side payment check)
+ * Staff manual approve request
  */
 async function approveRequest(entityType, entityId, staffUser) {
   const gate = await checkPaymentGate(entityType, entityId);
   const normStatus = String(gate.currentStatus || '').toLowerCase();
 
-  // Server-side Hard Gate: direct API calls must fail if unpaid
-  if (!gate.isPaid) {
-    const err = new Error(`Cannot approve unpaid request. Required payment threshold is ₱${gate.depositRequired.toLocaleString()} (${gate.depositPercent}%), but only ₱${gate.totalPaid.toLocaleString()} has been recorded.`);
-    err.statusCode = 403;
-    throw err;
-  }
-
-  // Must be in pending_approval (or pending_payment if just paid)
+  // Must be in pending_approval (or pending_payment, pending, requested, confirmed)
   if (!['pending_approval', 'pending_payment', 'pending', 'requested', 'confirmed'].includes(normStatus)) {
     const err = new Error(`Cannot approve request with current status "${gate.currentStatus}".`);
     err.statusCode = 400;
@@ -209,21 +206,164 @@ async function approveRequest(entityType, entityId, staffUser) {
   }
 
   const tableName = entityType === 'booking' ? 'bookings' : (entityType === 'motor_rental' ? 'motor_rentals' : 'activity_rentals');
-  const targetStatus = entityType === 'motor_rental' ? 'ACTIVE' : (entityType === 'activity_rental' ? 'active' : 'confirmed');
+  const targetStatus = entityType === 'motor_rental' ? 'RESERVED' : (entityType === 'activity_rental' ? 'active' : 'confirmed');
 
-  await pool.query(
-    `UPDATE ${tableName} 
-     SET status = ?, approved_by = ?, approved_at = NOW(), updated_at = NOW() 
-     WHERE id = ?`,
-    [targetStatus, staffUser.id, entityId]
-  );
+  let autoRejectedConflicts = 0;
 
-  // If motor rental, ensure motorcycle is marked RENTED
-  if (entityType === 'motor_rental') {
-    const [mr] = await pool.query('SELECT motor_id FROM motor_rentals WHERE id = ?', [entityId]);
-    if (mr.length > 0) {
-      await pool.query("UPDATE motorcycles SET status = 'RENTED', updated_at = NOW() WHERE id = ?", [mr[0].motor_id]);
+  // ── SERVER-SIDE RE-VALIDATION AT APPROVAL TIME ──
+  if (entityType === 'booking') {
+    const [bkRows] = await pool.query(
+      'SELECT b.id, b.room_id, b.check_in, b.check_out, r.room_number FROM bookings b JOIN rooms r ON r.id = b.room_id WHERE b.id = ?',
+      [entityId]
+    );
+    if (bkRows.length === 0) throw new Error('Booking not found.');
+    const currentBooking = bkRows[0];
+
+    // Re-check: Is the room already reserved/confirmed for overlapping dates?
+    const [confirmedOverlap] = await pool.query(`
+      SELECT b.id, b.check_in, b.check_out, u.full_name AS customer_name
+      FROM bookings b
+      LEFT JOIN users u ON u.id = b.customer_id
+      WHERE b.room_id = ?
+        AND b.id != ?
+        AND b.status IN ('confirmed', 'approved', 'checked_in', 'active')
+        AND (b.check_in < ? AND b.check_out > ?)
+      LIMIT 1
+    `, [currentBooking.room_id, entityId, currentBooking.check_out, currentBooking.check_in]);
+
+    if (confirmedOverlap.length > 0) {
+      const err = new Error(
+        `Cannot approve reservation: Room ${currentBooking.room_number} is already confirmed/reserved for another guest (${confirmedOverlap[0].customer_name || 'Guest'}) for overlapping dates.`
+      );
+      err.statusCode = 409;
+      throw err;
     }
+
+    // Approve the booking and flip room to reserved
+    await pool.query(
+      `UPDATE bookings 
+       SET status = ?, approved_by = ?, approved_at = NOW(), updated_at = NOW() 
+       WHERE id = ?`,
+      [targetStatus, staffUser.id, entityId]
+    );
+    await pool.query("UPDATE rooms SET status = 'reserved', updated_at = NOW() WHERE id = ?", [currentBooking.room_id]);
+
+    // Auto-detect and auto-reject any other still-pending request(s) for the same room with overlapping dates
+    const [conflictingPending] = await pool.query(`
+      SELECT b.id, b.customer_id, u.full_name, u.email
+      FROM bookings b
+      LEFT JOIN users u ON u.id = b.customer_id
+      WHERE b.room_id = ?
+        AND b.id != ?
+        AND b.status IN ('pending_approval', 'pending_payment', 'pending', 'requested')
+        AND (b.check_in < ? AND b.check_out > ?)
+    `, [currentBooking.room_id, entityId, currentBooking.check_out, currentBooking.check_in]);
+
+    for (const conflict of conflictingPending) {
+      const autoReason = `Room became unavailable — another reservation for Room ${currentBooking.room_number} was approved first`;
+      await pool.query(
+        `UPDATE bookings 
+         SET status = 'rejected', rejection_reason = ?, rejected_by = ?, rejected_at = NOW(), updated_at = NOW() 
+         WHERE id = ?`,
+        [autoReason, staffUser.id, conflict.id]
+      );
+      await pool.query(
+        "UPDATE bills SET status = 'cancelled', cancellation_fee = 0.00, updated_at = NOW() WHERE booking_id = ?",
+        [conflict.id]
+      );
+      await logAudit(pool, {
+        entityType: 'booking',
+        entityId: conflict.id,
+        fromStatus: 'pending_approval',
+        toStatus: 'rejected',
+        performedBy: staffUser.id,
+        performedByName: staffUser.full_name || staffUser.username,
+        triggerType: 'system',
+        reason: `Auto-rejected due to approval of booking #${entityId} for Room ${currentBooking.room_number}`,
+        metadata: { approvedBookingId: entityId, roomNumber: currentBooking.room_number },
+      });
+      autoRejectedConflicts += 1;
+    }
+  } else if (entityType === 'motor_rental') {
+    const [mrRows] = await pool.query(
+      'SELECT id, motor_id, rental_id, start_datetime, expected_return_datetime FROM motor_rentals WHERE id = ?',
+      [entityId]
+    );
+    if (mrRows.length === 0) throw new Error('Motor rental not found.');
+    const currentRental = mrRows[0];
+
+    // Re-check: Is the motorcycle already reserved/rented for overlapping dates?
+    const [confirmedOverlap] = await pool.query(`
+      SELECT mr.id, mr.rental_id, mr.start_datetime, mr.expected_return_datetime, u.full_name AS customer_name
+      FROM motor_rentals mr
+      LEFT JOIN users u ON u.id = mr.customer_id
+      WHERE mr.motor_id = ?
+        AND mr.id != ?
+        AND mr.status IN ('ACTIVE', 'RESERVED', 'OVERDUE')
+        AND (mr.start_datetime < ? AND mr.expected_return_datetime > ?)
+      LIMIT 1
+    `, [currentRental.motor_id, entityId, currentRental.expected_return_datetime, currentRental.start_datetime]);
+
+    if (confirmedOverlap.length > 0) {
+      const err = new Error(
+        `Cannot approve rental: Motorcycle is already reserved or rented for another customer (${confirmedOverlap[0].customer_name || 'Customer'}) for overlapping dates.`
+      );
+      err.statusCode = 409;
+      throw err;
+    }
+
+    // Approve the rental and flip motorcycle to RESERVED
+    await pool.query(
+      `UPDATE motor_rentals 
+       SET status = ?, approved_by = ?, approved_at = NOW(), updated_at = NOW() 
+       WHERE id = ?`,
+      [targetStatus, staffUser.id, entityId]
+    );
+    await pool.query("UPDATE motorcycles SET status = 'RESERVED', updated_at = NOW() WHERE id = ?", [currentRental.motor_id]);
+
+    // Auto-detect and auto-reject any other still-pending request(s) for the same motorcycle with overlapping datetimes
+    const [conflictingPending] = await pool.query(`
+      SELECT mr.id, mr.rental_id, mr.customer_id, u.full_name
+      FROM motor_rentals mr
+      LEFT JOIN users u ON u.id = mr.customer_id
+      WHERE mr.motor_id = ?
+        AND mr.id != ?
+        AND mr.status IN ('PENDING_APPROVAL', 'PENDING_PAYMENT', 'PENDING')
+        AND (mr.start_datetime < ? AND mr.expected_return_datetime > ?)
+    `, [currentRental.motor_id, entityId, currentRental.expected_return_datetime, currentRental.start_datetime]);
+
+    for (const conflict of conflictingPending) {
+      const autoReason = 'Motorcycle became unavailable — another rental for this motorcycle was approved first';
+      await pool.query(
+        `UPDATE motor_rentals 
+         SET status = 'REJECTED', rejection_reason = ?, rejected_by = ?, rejected_at = NOW(), updated_at = NOW() 
+         WHERE id = ?`,
+        [autoReason, staffUser.id, conflict.id]
+      );
+      await pool.query(
+        "UPDATE bills SET status = 'cancelled', cancellation_fee = 0.00, updated_at = NOW() WHERE motor_rental_id = ? OR (bill_number IS NOT NULL AND bill_number = ?)",
+        [conflict.id, `BILL-${conflict.rental_id}`]
+      );
+      await logAudit(pool, {
+        entityType: 'motor_rental',
+        entityId: conflict.id,
+        fromStatus: 'PENDING_APPROVAL',
+        toStatus: 'REJECTED',
+        performedBy: staffUser.id,
+        performedByName: staffUser.full_name || staffUser.username,
+        triggerType: 'system',
+        reason: `Auto-rejected due to approval of rental #${entityId}`,
+        metadata: { approvedRentalId: entityId },
+      });
+      autoRejectedConflicts += 1;
+    }
+  } else {
+    await pool.query(
+      `UPDATE ${tableName} 
+       SET status = ?, approved_by = ?, approved_at = NOW(), updated_at = NOW() 
+       WHERE id = ?`,
+      [targetStatus, staffUser.id, entityId]
+    );
   }
 
   await logAudit(pool, {
@@ -234,8 +374,8 @@ async function approveRequest(entityType, entityId, staffUser) {
     performedBy: staffUser.id,
     performedByName: staffUser.full_name || staffUser.username,
     triggerType: 'manual',
-    reason: 'Staff approved request after verifying payment.',
-    metadata: { totalPaid: gate.totalPaid, approvedBy: staffUser.full_name },
+    reason: 'Staff approved customer reservation.',
+    metadata: { totalPaid: gate.totalPaid, approvedBy: staffUser.full_name, isPaid: gate.isPaid },
   });
 
   return { success: true, status: targetStatus, message: 'Request approved successfully.' };
@@ -263,6 +403,14 @@ async function rejectRequest(entityType, entityId, staffUser, reason, notes = ''
     [targetStatus, fullReason, staffUser.id, entityId]
   );
 
+  // If booking, release room back to available
+  if (entityType === 'booking') {
+    const [bk] = await pool.query('SELECT room_id FROM bookings WHERE id = ?', [entityId]);
+    if (bk.length > 0 && bk[0].room_id) {
+      await pool.query("UPDATE rooms SET status = 'available', updated_at = NOW() WHERE id = ?", [bk[0].room_id]);
+    }
+  }
+
   // If motor rental was holding a motor, release motorcycle
   if (entityType === 'motor_rental') {
     const [mr] = await pool.query('SELECT motor_id FROM motor_rentals WHERE id = ?', [entityId]);
@@ -272,13 +420,24 @@ async function rejectRequest(entityType, entityId, staffUser, reason, notes = ''
   }
 
   // Cancel associated bill
-  const billFkCol = entityType === 'booking' ? 'booking_id' : (entityType === 'motor_rental' ? 'motor_rental_id' : 'activity_rental_id');
-  await pool.query(
-    `UPDATE bills 
-     SET status = 'cancelled', cancellation_fee = 0.00, updated_at = NOW() 
-     WHERE ${billFkCol} = ?`,
-    [entityId]
-  );
+  if (entityType === 'booking') {
+    await pool.query(
+      "UPDATE bills SET status = 'cancelled', cancellation_fee = 0.00, updated_at = NOW() WHERE booking_id = ?",
+      [entityId]
+    );
+  } else if (entityType === 'motor_rental') {
+    const [mrRows] = await pool.query('SELECT rental_id FROM motor_rentals WHERE id = ?', [entityId]);
+    const rentalCode = mrRows[0]?.rental_id;
+    await pool.query(
+      "UPDATE bills SET status = 'cancelled', cancellation_fee = 0.00, updated_at = NOW() WHERE motor_rental_id = ? OR (bill_number IS NOT NULL AND bill_number = ?)",
+      [entityId, `BILL-${rentalCode}`]
+    );
+  } else {
+    await pool.query(
+      "UPDATE bills SET status = 'cancelled', cancellation_fee = 0.00, updated_at = NOW() WHERE activity_rental_id = ?",
+      [entityId]
+    );
+  }
 
   // If paid, create a refund record for finance reconciliation
   let refundId = null;
@@ -353,6 +512,14 @@ async function cancelRequest(entityType, entityId, user, reason = 'Cancelled by 
      WHERE ${billFkCol} = ?`,
     [fee, entityId]
   );
+
+  // If booking, release room back to available
+  if (entityType === 'booking') {
+    const [bk] = await pool.query('SELECT room_id FROM bookings WHERE id = ?', [entityId]);
+    if (bk.length > 0 && bk[0].room_id) {
+      await pool.query("UPDATE rooms SET status = 'available', updated_at = NOW() WHERE id = ?", [bk[0].room_id]);
+    }
+  }
 
   // If motor rental, release motorcycle
   if (entityType === 'motor_rental') {

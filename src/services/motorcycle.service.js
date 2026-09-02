@@ -108,7 +108,9 @@ async function getMotorcycles(req, res) {
         m.image_url,
         CASE 
           WHEN m.status = 'MAINTENANCE' THEN 'MAINTENANCE'
-          WHEN active_r.id IS NOT NULL THEN 'RENTED'
+          WHEN m.status = 'RESERVED' THEN 'RESERVED'
+          WHEN active_r.id IS NOT NULL AND active_r.status = 'ACTIVE' THEN 'RENTED'
+          WHEN active_r.id IS NOT NULL THEN 'RESERVED'
           ELSE m.status 
         END AS status,
         m.created_at,
@@ -120,7 +122,7 @@ async function getMotorcycles(req, res) {
       LEFT JOIN (
         SELECT mr.id, mr.motor_id, mr.rental_id, mr.status, mr.expected_return_datetime
         FROM motor_rentals mr
-        WHERE mr.status IN ('PENDING_PAYMENT', 'PENDING_APPROVAL', 'ACTIVE', 'OVERDUE')
+        WHERE mr.status IN ('ACTIVE', 'RESERVED', 'OVERDUE')
       ) active_r ON active_r.motor_id = m.id
       WHERE 1=1
     `;
@@ -513,11 +515,12 @@ async function createMotorRental(req, res) {
     const initialPayAmount = req.body.initial_payment ? Number(req.body.initial_payment) : (isCustomer ? 0 : totalAmount);
 
     const [billRes] = await conn.query(`
-      INSERT INTO bills (bill_number, customer_id, total_amount, paid_amount, status, issued_by, issued_at)
-      VALUES (?, ?, ?, ?, ?, ?, NOW())
+      INSERT INTO bills (bill_number, customer_id, motor_rental_id, total_amount, paid_amount, status, issued_by, issued_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, NOW())
     `, [
       billNumber,
       targetCustomerId,
+      newRentalDbId,
       totalAmount,
       initialPayAmount,
       initialPayAmount >= totalAmount ? 'paid' : (initialPayAmount > 0 ? 'partially_paid' : 'unpaid'),
@@ -538,8 +541,12 @@ async function createMotorRental(req, res) {
       `, [billId, initialPayAmount, req.body.payment_method || 'cash', req.user.id, `Payment for ${rentalId}`]);
     }
 
-    // Update motorcycle status to RENTED immediately so it shows unavailable to other guests
-    await conn.query('UPDATE motorcycles SET status = ? WHERE id = ?', ['RENTED', motor_id]);
+    // Update motorcycle status:
+    // When a customer requests a rental, the motorcycle remains AVAILABLE until payment is recorded.
+    // On immediate staff walk-in / dispatch or full payment, it is marked RENTED.
+    if (!isCustomer || initialPayAmount >= totalAmount) {
+      await conn.query('UPDATE motorcycles SET status = ? WHERE id = ?', ['RENTED', motor_id]);
+    }
 
     // Create Audit Log
     const performerName = req.user.full_name || req.user.username;
@@ -547,7 +554,7 @@ async function createMotorRental(req, res) {
       rentalId: newRentalDbId,
       rentalUniqueId: rentalId,
       motorId: motor_id,
-      action: isCustomer ? 'Motor rental requested' : 'Motorcycle rented',
+      action: isCustomer ? 'Motor rental requested (Pending Approval)' : 'Motorcycle rented',
       performedBy: req.user.id,
       performedByName: performerName,
       performedByRole: req.user.role,

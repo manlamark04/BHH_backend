@@ -80,7 +80,7 @@ router.post('/',
     body('check_in_time').if(body('booking_type').equals('short_time'))
       .notEmpty().withMessage('Check-in time is required for short-time bookings.'),
     body('duration_hours').if(body('booking_type').equals('short_time'))
-      .isInt({ min: 1, max: 3 }).withMessage('Duration must be between 1 and 3 hours.'),
+      .isInt({ min: 1, max: 5 }).withMessage('Duration must be between 1 and 5 hours.'),
   ],
   validate, svc.createBooking
 );
@@ -118,6 +118,26 @@ router.patch('/:id/status',
   authenticate, requireRole('staff', 'admin'),
   [body('status').notEmpty()],
   validate, svc.updateBookingStatus
+);
+
+// POST /api/bookings/process-no-shows — Staff/Admin: Run midnight cutoff sweep on demand
+router.post('/process-no-shows',
+  authenticate, requireRole('staff', 'admin'),
+  svc.processNoShowsManual
+);
+
+// POST /api/bookings/:id/no-show — Staff/Admin: Mark booking as No-Show
+router.post('/:id/no-show',
+  authenticate, requireRole('staff', 'admin'),
+  svc.markBookingNoShow
+);
+
+// PATCH /api/bookings/:id/waive-no-show — Staff/Admin: Waive or adjust no-show fee
+router.patch('/:id/waive-no-show',
+  authenticate, requireRole('staff', 'admin'),
+  [body('reason').trim().notEmpty().withMessage('A waiver justification reason is required.')],
+  validate,
+  svc.waiveBookingNoShowFee
 );
 
 // POST /api/bookings/:id/payment — Staff/Admin: Record payment

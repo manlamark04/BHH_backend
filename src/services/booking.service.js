@@ -6,7 +6,7 @@ const requestLifecycle = require('./request-lifecycle.service');
 // Hourly rate = (rate_per_night / 24) × SHORT_TIME_MULTIPLIER
 // Adjustable here or promote to a settings table later.
 const SHORT_TIME_MULTIPLIER = 2.0;
-const SHORT_TIME_MAX_HOURS  = 3;
+const SHORT_TIME_MAX_HOURS  = 5;
 
 /** GET /api/bookings — Staff/Admin: all bookings with full customer, room, and payment details */
 async function getAllBookings(req, res) {
@@ -295,7 +295,7 @@ async function createBooking(req, res) {
       JOIN rooms r ON r.id = b.room_id
       JOIN users u ON u.id = b.customer_id
       WHERE b.customer_id = ?
-        AND b.status NOT IN ('cancelled', 'checked_out', 'rejected')
+        AND b.status NOT IN ('cancelled', 'checked_out', 'rejected', 'no_show')
       ORDER BY b.id DESC
     `, [targetCustomerId]);
 
@@ -328,10 +328,12 @@ async function createBooking(req, res) {
     }
 
     // Check room availability (works for both booking types via datetime overlap)
+    // Only confirmed, checked-in, or approved bookings block other guests from requesting the room.
+    // Requests sitting in pending_approval leave the room bookable for other guests.
     const [overlap] = await pool.query(`
       SELECT id FROM bookings 
       WHERE room_id = ? 
-        AND status NOT IN ('cancelled', 'checked_out', 'rejected')
+        AND status IN ('confirmed', 'checked_in', 'approved', 'active')
         AND (check_in < ? AND check_out > ?)
     `, [room_id, effectiveCheckOut, effectiveCheckIn]);
 
@@ -365,7 +367,7 @@ async function createBooking(req, res) {
 
     // Set payment deadline (e.g. NOW + 24 hours)
     const paymentDeadline = requestLifecycle.getPaymentDeadline();
-    let initialStatus = 'pending_payment';
+    let initialStatus = 'pending_approval';
 
     // Insert booking
     const [result] = await pool.query(`
@@ -423,7 +425,7 @@ async function createBooking(req, res) {
         VALUES (?, ?, ?, ?, NOW(), 'Initial reservation payment')
       `, [billId, initialPayAmount, validMethod, req.user.id]);
 
-      // Check payment gate & auto-transition to pending_approval or confirmed (if staff)
+      // Check payment gate & auto-transition if staff
       const payTransition = await requestLifecycle.handlePaymentReceived('booking', newBookingId, {
         userId: req.user.id,
         userName: req.user.full_name || req.user.username,
@@ -432,24 +434,31 @@ async function createBooking(req, res) {
       if (payTransition.transitioned) {
         initialStatus = payTransition.newStatus;
       }
-      // Mark room as reserved
-      await pool.query("UPDATE rooms SET status = 'reserved', updated_at = NOW() WHERE id = ?", [room_id]);
-
-      // Audit log creation in pending_payment
-      await requestLifecycle.logAudit(pool, {
-        entityType: 'booking',
-        entityId: newBookingId,
-        fromStatus: null,
-        toStatus: 'pending_payment',
-        performedBy: req.user.id,
-        performedByName: req.user.full_name || req.user.username,
-        triggerType: req.user.role === 'customer' ? 'manual' : 'manual',
-        reason: isShortTime
-          ? `Short-time booking requested (${duration_hours}h). Awaiting payment.`
-          : 'Booking requested by customer. Awaiting payment.',
-        metadata: { totalPrice, paymentDeadline, booking_type: isShortTime ? 'short_time' : 'per_night' },
-      });
     }
+
+    // Update room status:
+    // When a guest submits a reservation request, the room remains 'available'.
+    // Only when confirmed or checked in does it flip to 'reserved' or 'occupied'.
+    if (initialStatus === 'checked_in') {
+      await pool.query("UPDATE rooms SET status = 'occupied', updated_at = NOW() WHERE id = ?", [room_id]);
+    } else if (initialStatus === 'confirmed') {
+      await pool.query("UPDATE rooms SET status = 'reserved', updated_at = NOW() WHERE id = ?", [room_id]);
+    }
+
+    // Audit log creation
+    await requestLifecycle.logAudit(pool, {
+      entityType: 'booking',
+      entityId: newBookingId,
+      fromStatus: null,
+      toStatus: initialStatus,
+      performedBy: req.user.id,
+      performedByName: req.user.full_name || req.user.username,
+      triggerType: 'manual',
+      reason: isShortTime
+        ? `Short-time booking requested (${duration_hours}h). Status: ${initialStatus}.`
+        : `Room reservation created. Status: ${initialStatus}.`,
+      metadata: { totalPrice, paymentDeadline, booking_type: isShortTime ? 'short_time' : 'per_night', status: initialStatus },
+    });
 
     res.status(201).json({
       id: newBookingId,
@@ -503,6 +512,51 @@ async function cancelBooking(req, res) {
   }
 }
 
+/** POST /api/bookings/:id/no-show — Staff manual mark as no-show */
+async function markBookingNoShow(req, res) {
+  try {
+    const bookingId = parseInt(req.params.id, 10);
+    const { custom_fee, reason } = req.body;
+    const noshowService = require('./noshow.service');
+    const result = await noshowService.processBookingNoShow(bookingId, {
+      staffUser: req.user,
+      triggerType: 'manual_override',
+      customFee: custom_fee !== undefined ? custom_fee : null,
+      reason: reason || 'Staff manually marked booking as No-Show',
+    });
+    res.json(result);
+  } catch (err) {
+    console.error('markBookingNoShow error:', err);
+    res.status(err.statusCode || 500).json({ message: err.message });
+  }
+}
+
+/** PATCH /api/bookings/:id/waive-no-show — Staff waive or adjust no-show fee */
+async function waiveBookingNoShowFee(req, res) {
+  try {
+    const bookingId = parseInt(req.params.id, 10);
+    const { reason, new_fee } = req.body;
+    const noshowService = require('./noshow.service');
+    const result = await noshowService.waiveNoShowFee(bookingId, req.user, reason, new_fee !== undefined ? new_fee : 0);
+    res.json(result);
+  } catch (err) {
+    console.error('waiveBookingNoShowFee error:', err);
+    res.status(err.statusCode || 500).json({ message: err.message });
+  }
+}
+
+/** POST /api/bookings/process-no-shows — Run midnight cutoff sweep on demand */
+async function processNoShowsManual(req, res) {
+  try {
+    const noshowService = require('./noshow.service');
+    const count = await noshowService.sweepExpiredCheckIns();
+    res.json({ success: true, processed_count: count, message: `Sweeper processed ${count} expired reservation(s) as No-Show.` });
+  } catch (err) {
+    console.error('processNoShowsManual error:', err);
+    res.status(500).json({ message: err.message });
+  }
+}
+
 /** GET /api/bookings/:id/audit — Staff/Admin: Get state machine audit trail */
 async function getBookingAuditTrail(req, res) {
   try {
@@ -539,16 +593,22 @@ async function updateBookingStatus(req, res) {
     if (normStatus === 'cancelled') {
       return await cancelBooking(req, res);
     }
+    if (normStatus === 'no_show') {
+      req.body.reason = remarks || 'Staff marked as No-Show';
+      return await markBookingNoShow(req, res);
+    }
 
     // Update booking status
     await pool.query('UPDATE bookings SET status = ?, updated_at = NOW() WHERE id = ?', [normStatus, bookingId]);
 
     // Synchronize room status
-    if (normStatus === 'checked_in') {
+    if (normStatus === 'confirmed' || normStatus === 'approved') {
+      await pool.query("UPDATE rooms SET status = 'reserved', updated_at = NOW() WHERE id = ?", [booking.room_id]);
+    } else if (normStatus === 'checked_in') {
       await pool.query("UPDATE rooms SET status = 'occupied', updated_at = NOW() WHERE id = ?", [booking.room_id]);
     } else if (normStatus === 'checked_out' || normStatus === 'completed') {
       await pool.query("UPDATE rooms SET status = 'cleaning', updated_at = NOW() WHERE id = ?", [booking.room_id]);
-    } else if (normStatus === 'cancelled') {
+    } else if (normStatus === 'cancelled' || normStatus === 'rejected' || normStatus === 'no_show') {
       await pool.query("UPDATE rooms SET status = 'available', updated_at = NOW() WHERE id = ?", [booking.room_id]);
     }
 
@@ -1459,6 +1519,9 @@ module.exports = {
   approveBooking,
   rejectBooking,
   cancelBooking,
+  markBookingNoShow,
+  waiveBookingNoShowFee,
+  processNoShowsManual,
   getBookingAuditTrail,
   updateBookingStatus,
   editBooking,
