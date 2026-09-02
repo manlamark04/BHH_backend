@@ -2,15 +2,20 @@ const express  = require('express');
 const { body } = require('express-validator');
 const router   = express.Router();
 const svc      = require('../services/billing.service');
+const eodSvc   = require('../services/eod.service');
 const { authenticate } = require('../middleware/auth');
 const { requireRole }  = require('../middleware/roles');
 const { validate }     = require('../middleware/validate');
+
+// GET /api/bills/eod-report — Staff/Admin: Daily cashier shift turnover report
+router.get('/eod-report', authenticate, requireRole('staff', 'admin'), eodSvc.getEODReport);
 
 // GET /api/bills — Staff/Admin
 router.get('/', authenticate, requireRole('staff', 'admin'), svc.getAllBills);
 
 // GET /api/bills/my — Customer: own bills/history
 router.get('/my', authenticate, requireRole('customer'), svc.getMyBills);
+
 
 // GET /api/bills/:id/items — line items
 router.get('/:id/items', authenticate, requireRole('staff', 'admin', 'customer'), svc.getBillLineItems);

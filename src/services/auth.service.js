@@ -189,12 +189,18 @@ async function login(req, res) {
  * POST /api/auth/change-password
  */
 async function changePassword(req, res) {
+  const pool = require('../config/db');
   try {
     const { current_password, new_password } = req.body;
     const user = await db.auth.getUserById(req.user.id);
+    if (!user) return res.status(404).json({ message: 'User not found.' });
 
-    const valid = await bcrypt.compare(current_password, user.password_hash);
-    if (!valid) return res.status(400).json({ message: 'Current password is incorrect.' });
+    // Verify against current hash or assigned default password
+    const validHash = await bcrypt.compare(current_password, user.password_hash);
+    const validDefault = Boolean(user.default_password && current_password === user.default_password);
+    if (!validHash && !validDefault) {
+      return res.status(400).json({ message: 'Current password is incorrect.' });
+    }
 
     const errors = validatePassword(new_password);
     if (errors.length) return res.status(422).json({ errors });
@@ -204,6 +210,10 @@ async function changePassword(req, res) {
 
     const newHash = await bcrypt.hash(new_password, SALT_ROUNDS);
     await db.auth.changePassword(req.user.id, newHash);
+
+    // Clear must_change_password and default_password
+    await pool.query('UPDATE users SET must_change_password = FALSE, default_password = NULL WHERE id = ?', [req.user.id]);
+
     res.json({ message: 'Password changed successfully.', must_change_password: false });
   } catch (err) {
     res.status(500).json({ message: err.message });

@@ -15,6 +15,8 @@ const reportRoutes      = require('./routes/reports.routes');
 const motorcycleRoutes  = require('./routes/motorcycle.routes');
 const courtRoutes       = require('./routes/courts.routes');
 const auditRoutes       = require('./routes/audit.routes');
+const notificationRoutes = require('./routes/notifications.routes');
+const inquiryRoutes     = require('./routes/inquiries.routes');
 
 const app = express();
 
@@ -32,17 +34,21 @@ app.use(express.urlencoded({ limit: '50mb', extended: true }));
 app.use('/uploads', express.static(path.join(__dirname, '..', process.env.UPLOADS_DIR || 'uploads')));
 
 // ── Routes ─────────────────────────────────────────────────
-app.use('/api/auth',        authRoutes);
-app.use('/api/users',       userRoutes);
-app.use('/api/rooms',       roomRoutes);
-app.use('/api/services',    serviceRoutes);
-app.use('/api/activities',  activityRoutes);
-app.use('/api/motorcycles', motorcycleRoutes);
-app.use('/api/courts',      courtRoutes);
-app.use('/api/bookings',    bookingRoutes);
-app.use('/api/bills',       billingRoutes);
-app.use('/api/reports',     reportRoutes);
-app.use('/api/audit',       auditRoutes);
+app.use('/api/auth',          authRoutes);
+app.use('/api/users',         userRoutes);
+app.use('/api/rooms',         roomRoutes);
+app.use('/api/services',      serviceRoutes);
+app.use('/api/activities',    activityRoutes);
+app.use('/api/motorcycles',   motorcycleRoutes);
+app.use('/api/courts',        courtRoutes);
+app.use('/api/bookings',      bookingRoutes);
+app.use('/api/bills',         billingRoutes);
+app.use('/api/reports',       reportRoutes);
+app.use('/api/audit',         auditRoutes);
+app.use('/api/notifications', notificationRoutes);
+app.use('/api/inquiries',     inquiryRoutes);
+
+
 
 const pool = require('./config/db');
 

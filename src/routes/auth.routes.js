@@ -4,9 +4,30 @@ const router    = express.Router();
 const svc       = require('../services/auth.service');
 const { authenticate } = require('../middleware/auth');
 const { validate }     = require('../middleware/validate');
+const rateLimit        = require('express-rate-limit');
+
+// ── Rate Limiters ────────────────────────────────────────────
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { message: 'Too many login attempts. Please try again in 15 minutes.' },
+  skipSuccessfulRequests: true,
+});
+
+const registerLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, // 1 hour
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { message: 'Too many registration attempts. Please try again later.' },
+});
+
 
 // POST /api/auth/register
 router.post('/register',
+  registerLimiter,
   [
     body('first_name').optional().trim(),
     body('last_name').optional().trim(),
@@ -34,6 +55,7 @@ router.post('/register',
 
 // POST /api/auth/login
 router.post('/login',
+  loginLimiter,
   [
     body('identifier').trim().notEmpty().withMessage('Email or username is required.'),
     body('password').notEmpty().withMessage('Password is required.'),

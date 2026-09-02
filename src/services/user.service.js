@@ -682,7 +682,27 @@ async function rejectUser(req, res) {
 /** POST /api/users/toggle/:id — Admin: enable/disable */
 async function toggleUserStatus(req, res) {
   try {
-    const user = await db.users.toggleStatus(parseInt(req.params.id, 10), req.user.id);
+    const targetId = parseInt(req.params.id, 10);
+
+    // Task 13: Last-admin disable guard — prevent total lockout
+    const [targetRows] = await pool.query('SELECT role, status FROM users WHERE id = ? LIMIT 1', [targetId]);
+    if (!targetRows || targetRows.length === 0) {
+      return res.status(404).json({ message: 'User not found.' });
+    }
+    const target = targetRows[0];
+    if (target.role === 'admin' && String(target.status).toLowerCase() === 'active') {
+      const [adminCountRows] = await pool.query(
+        "SELECT COUNT(*) AS cnt FROM users WHERE role = 'admin' AND LOWER(status) = 'active'"
+      );
+      const activeAdminCount = Number(adminCountRows[0]?.cnt || 0);
+      if (activeAdminCount <= 1) {
+        return res.status(400).json({
+          message: 'Cannot disable the last active administrator. Create another admin account first to prevent a system lockout.',
+        });
+      }
+    }
+
+    const user = await db.users.toggleStatus(targetId, req.user.id);
     res.json({ message: `User ${user.status}.`, user });
   } catch (err) {
     if (err.message?.includes('last active admin')) {
