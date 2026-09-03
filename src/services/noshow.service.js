@@ -8,14 +8,14 @@ const requestLifecycle = require('./request-lifecycle.service');
  * - 'percentage' (Option C): Fixed % of total booking value.
  */
 function calculateNoShowFee(booking, room) {
-  const policy = (process.env.NO_SHOW_FEE_POLICY || 'first_night').toLowerCase();
+  const policy = (process.env.NO_SHOW_FEE_POLICY || 'percentage').toLowerCase();
 
   if (policy === 'flat') {
     return parseFloat(process.env.NO_SHOW_FEE_FLAT_AMOUNT || '200');
   }
 
   if (policy === 'percentage') {
-    const pct = parseFloat(process.env.NO_SHOW_FEE_PERCENTAGE || '50');
+    const pct = parseFloat(process.env.NO_SHOW_FEE_PERCENTAGE || '20');
     return Math.round((Number(booking.total_price || 0) * (pct / 100)) * 100) / 100;
   }
 
@@ -44,134 +44,153 @@ function calculateNoShowFee(booking, room) {
  * @param {object} options { staffUser, triggerType, customFee, reason }
  */
 async function processBookingNoShow(bookingId, { staffUser = null, triggerType = 'system_cutoff', customFee = null, reason = null } = {}) {
-  const [bRows] = await pool.query(`
-    SELECT b.*, r.room_number, r.rate_per_night, r.room_type, u.full_name AS customer_name, u.email AS customer_email
-    FROM bookings b
-    JOIN rooms r ON r.id = b.room_id
-    JOIN users u ON u.id = b.customer_id
-    WHERE b.id = ?
-  `, [bookingId]);
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
 
-  if (bRows.length === 0) {
-    const err = new Error('Booking not found.');
-    err.statusCode = 404;
-    throw err;
-  }
+    const [bRows] = await conn.query(`
+      SELECT b.*, r.room_number, r.rate_per_night, r.room_type, u.full_name AS customer_name, u.email AS customer_email
+      FROM bookings b
+      JOIN rooms r ON r.id = b.room_id
+      JOIN users u ON u.id = b.customer_id
+      WHERE b.id = ?
+      FOR UPDATE
+    `, [bookingId]);
 
-  const booking = bRows[0];
-  const currentStatus = String(booking.status || '').toLowerCase();
-
-  if (currentStatus === 'checked_in') {
-    const err = new Error('Cannot mark booking as No-Show: guest has already checked in.');
-    err.statusCode = 400;
-    throw err;
-  }
-
-  if (currentStatus === 'no_show') {
-    return { success: true, bookingId, message: 'Booking is already marked as No-Show.' };
-  }
-
-  if (['cancelled', 'rejected', 'checked_out'].includes(currentStatus)) {
-    const err = new Error(`Cannot mark booking with status "${booking.status}" as No-Show.`);
-    err.statusCode = 400;
-    throw err;
-  }
-
-  // 1. Calculate No-Show Fee
-  const calculatedFee = customFee !== null ? Math.max(0, Number(customFee)) : calculateNoShowFee(booking, { rate_per_night: booking.rate_per_night });
-  const actionReason = reason || (triggerType === 'system_cutoff'
-    ? 'Automated midnight cutoff: Guest failed to check in by scheduled check-in date.'
-    : 'Staff manual override: Guest failed to arrive for scheduled reservation.');
-
-  // 2. Update booking status to no_show & record fee
-  await pool.query(`
-    UPDATE bookings 
-    SET status = 'no_show',
-        no_show_fee = ?,
-        no_show_at = NOW(),
-        rejection_reason = ?,
-        updated_at = NOW()
-    WHERE id = ?
-  `, [calculatedFee, actionReason, bookingId]);
-
-  // 3. Release room immediately back to 'available'
-  await pool.query("UPDATE rooms SET status = 'available', updated_at = NOW() WHERE id = ?", [booking.room_id]);
-
-  // 4. Update / adjust associated bill
-  const [billRows] = await pool.query('SELECT * FROM bills WHERE booking_id = ? ORDER BY id DESC LIMIT 1', [bookingId]);
-  let billId = null;
-  let remainingBalance = 0;
-  let refundPending = 0;
-
-  if (billRows.length > 0) {
-    const bill = billRows[0];
-    billId = bill.id;
-
-    // Check payments received
-    const [paidRows] = await pool.query(
-      "SELECT SUM(amount) AS total_paid FROM payments WHERE bill_id = ? AND (notes IS NULL OR notes NOT LIKE '%[REFUNDED%')",
-      [bill.id]
-    );
-    const totalPaid = Number(paidRows[0]?.total_paid || 0);
-
-    if (totalPaid >= calculatedFee) {
-      // Guest paid enough to cover no-show fee
-      refundPending = totalPaid - calculatedFee;
-      remainingBalance = 0;
-      await pool.query(
-        "UPDATE bills SET cancellation_fee = ?, status = 'paid', updated_at = NOW() WHERE id = ?",
-        [calculatedFee, bill.id]
-      );
-    } else {
-      // Guest owes difference or full fee
-      remainingBalance = calculatedFee - totalPaid;
-      const newStatus = totalPaid > 0 ? 'partially_paid' : 'unpaid';
-      await pool.query(
-        "UPDATE bills SET cancellation_fee = ?, status = ?, updated_at = NOW() WHERE id = ?",
-        [calculatedFee, newStatus, bill.id]
-      );
+    if (bRows.length === 0) {
+      const err = new Error('Booking not found.');
+      err.statusCode = 404;
+      throw err;
     }
 
-    // Add distinct line item to invoice for auditability
-    await pool.query(`
-      INSERT INTO bill_line_items (bill_id, description, quantity, unit_price)
-      VALUES (?, ?, 1, ?)
-    `, [bill.id, `No-Show Service Fee — BK-${new Date(booking.created_at).getFullYear()}-${String(booking.id).padStart(4, '0')}`, calculatedFee]);
+    const booking = bRows[0];
+    const currentStatus = String(booking.status || '').toLowerCase();
+
+    if (currentStatus === 'checked_in') {
+      const err = new Error('Cannot mark booking as No-Show: guest has already checked in.');
+      err.statusCode = 400;
+      throw err;
+    }
+
+    if (currentStatus === 'no_show') {
+      await conn.rollback();
+      return { success: true, bookingId, message: 'Booking is already marked as No-Show.' };
+    }
+
+    if (['cancelled', 'rejected', 'checked_out'].includes(currentStatus)) {
+      const err = new Error(`Cannot mark booking with status "${booking.status}" as No-Show.`);
+      err.statusCode = 400;
+      throw err;
+    }
+
+    // 1. Calculate No-Show Fee
+    const calculatedFee = customFee !== null ? Math.max(0, Number(customFee)) : calculateNoShowFee(booking, { rate_per_night: booking.rate_per_night });
+    const actionReason = reason || (triggerType === 'system_cutoff'
+      ? 'Automated midnight cutoff: Guest failed to check in by scheduled check-in date.'
+      : 'Staff manual override: Guest failed to arrive for scheduled reservation.');
+
+    // 2. Coordinated Step 1: Update booking status to no_show & record fee
+    await conn.query(`
+      UPDATE bookings 
+      SET status = 'no_show',
+          no_show_fee = ?,
+          no_show_at = NOW(),
+          rejection_reason = ?,
+          updated_at = NOW()
+      WHERE id = ?
+    `, [calculatedFee, actionReason, bookingId]);
+
+    // 3. Coordinated Step 2: Release room immediately and automatically back to 'available'
+    await conn.query("UPDATE rooms SET status = 'available', updated_at = NOW() WHERE id = ?", [booking.room_id]);
+
+    // 4. Coordinated Step 3: Update / adjust associated bill and invoice line items
+    const [billRows] = await conn.query('SELECT * FROM bills WHERE booking_id = ? ORDER BY id DESC LIMIT 1', [bookingId]);
+    let billId = null;
+    let remainingBalance = 0;
+    let refundPending = 0;
+
+    if (billRows.length > 0) {
+      const bill = billRows[0];
+      billId = bill.id;
+
+      // Check payments received
+      const [paidRows] = await conn.query(
+        "SELECT SUM(amount) AS total_paid FROM payments WHERE bill_id = ? AND (notes IS NULL OR notes NOT LIKE '%[REFUNDED%')",
+        [bill.id]
+      );
+      const totalPaid = Number(paidRows[0]?.total_paid || 0);
+
+      if (totalPaid >= calculatedFee) {
+        // Guest paid enough to cover no-show fee
+        refundPending = totalPaid - calculatedFee;
+        remainingBalance = 0;
+        await conn.query(
+          "UPDATE bills SET cancellation_fee = ?, status = 'paid', updated_at = NOW() WHERE id = ?",
+          [calculatedFee, bill.id]
+        );
+      } else {
+        // Guest owes difference or full fee
+        remainingBalance = calculatedFee - totalPaid;
+        const newStatus = totalPaid > 0 ? 'partially_paid' : 'unpaid';
+        await conn.query(
+          "UPDATE bills SET cancellation_fee = ?, status = ?, updated_at = NOW() WHERE id = ?",
+          [calculatedFee, newStatus, bill.id]
+        );
+      }
+
+      // Add distinct line item to invoice for auditability
+      await conn.query(`
+        INSERT INTO bill_line_items (bill_id, description, quantity, unit_price)
+        VALUES (?, ?, 1, ?)
+      `, [bill.id, `No-Show Service Fee — BK-${new Date(booking.created_at).getFullYear()}-${String(booking.id).padStart(4, '0')}`, calculatedFee]);
+    }
+
+    // 5. Coordinated Step 4: Audit Log Entry
+    const performerId = staffUser ? staffUser.id : null;
+    const performerName = staffUser ? (staffUser.full_name || staffUser.username) : 'System Midnight Cutoff';
+
+    await requestLifecycle.logAudit(conn, {
+      entityType: 'booking',
+      entityId: bookingId,
+      fromStatus: booking.status,
+      toStatus: 'no_show',
+      performedBy: performerId,
+      performedByName: performerName,
+      triggerType: triggerType === 'system_cutoff' ? 'system' : 'manual',
+      reason: actionReason,
+      metadata: {
+        noShowFee: calculatedFee,
+        roomNumber: booking.room_number,
+        checkIn: booking.check_in,
+        checkOut: booking.check_out,
+        remainingBalance,
+        refundPending,
+        roomReleasedTo: 'available',
+      },
+    });
+
+    // 6. Coordinated Step 5: Guest Notification (Logged & Ready for Dispatch)
+    console.log(`📨 [Guest Notification] No-Show alert generated for ${booking.customer_name} <${booking.customer_email}>: Reservation #${bookingId} marked as No-Show. Fee: ₱${calculatedFee.toLocaleString()}. Room ${booking.room_number} returned to Available.`);
+
+    await conn.commit();
+
+    return {
+      success: true,
+      bookingId,
+      status: 'no_show',
+      room_number: booking.room_number,
+      room_status: 'available',
+      no_show_fee: calculatedFee,
+      remaining_balance: remainingBalance,
+      refund_pending: refundPending,
+      message: `Booking #${bookingId} marked as No-Show. Room ${booking.room_number} automatically reverted to Available.`,
+    };
+  } catch (err) {
+    await conn.rollback();
+    throw err;
+  } finally {
+    conn.release();
   }
-
-  // 5. Audit Log
-  const performerId = staffUser ? staffUser.id : null;
-  const performerName = staffUser ? (staffUser.full_name || staffUser.username) : 'System Midnight Cutoff';
-
-  await requestLifecycle.logAudit(pool, {
-    entityType: 'booking',
-    entityId: bookingId,
-    fromStatus: booking.status,
-    toStatus: 'no_show',
-    performedBy: performerId,
-    performedByName: performerName,
-    triggerType: triggerType === 'system_cutoff' ? 'system' : 'manual',
-    reason: actionReason,
-    metadata: {
-      noShowFee: calculatedFee,
-      roomNumber: booking.room_number,
-      checkIn: booking.check_in,
-      checkOut: booking.check_out,
-      remainingBalance,
-      refundPending,
-    },
-  });
-
-  return {
-    success: true,
-    bookingId,
-    status: 'no_show',
-    room_number: booking.room_number,
-    no_show_fee: calculatedFee,
-    remaining_balance: remainingBalance,
-    refund_pending: refundPending,
-    message: `Booking #${bookingId} marked as No-Show. Room ${booking.room_number} released back to Available.`,
-  };
 }
 
 /**

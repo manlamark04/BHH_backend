@@ -285,6 +285,58 @@ async function createBooking(req, res) {
       effectiveCheckOut = `${y}-${m}-${d} ${h}:${min}:00`;
     }
 
+    // ── Enforce No-Unpaid-Balance Rule ──
+    // A guest who has unpaid balances (e.g., unpaid No-Show service fees, cancelled penalties, or past due bills)
+    // is blocked from creating new room reservations until their remaining balance is settled.
+    if (req.user.role === 'customer') {
+      const [unpaidBills] = await pool.query(`
+        SELECT 
+          b.id, b.bill_number, b.total_amount, b.cancellation_fee, b.status AS bill_status,
+          bk.status AS booking_status, bk.no_show_fee, bk.no_show_at,
+          COALESCE(paid_tbl.total_paid, 0) AS total_paid
+        FROM bills b
+        LEFT JOIN bookings bk ON bk.id = b.booking_id
+        LEFT JOIN (
+          SELECT bill_id, SUM(amount) AS total_paid
+          FROM payments
+          WHERE notes IS NULL OR notes NOT LIKE '%[REFUNDED%'
+          GROUP BY bill_id
+        ) paid_tbl ON paid_tbl.bill_id = b.id
+        WHERE b.customer_id = ?
+      `, [targetCustomerId]);
+
+      let totalUnpaidBalance = 0;
+      for (const b of unpaidBills) {
+        const paid = Number(b.total_paid || 0);
+        const isCancelled = ['cancelled', 'void'].includes(String(b.bill_status || '').toLowerCase()) || ['cancelled', 'rejected'].includes(String(b.booking_status || '').toLowerCase());
+        const isNoShow = String(b.booking_status || '').toLowerCase() === 'no_show';
+        const fee = Number(b.no_show_fee ?? b.cancellation_fee ?? 0);
+        const total = Number(b.total_amount || 0);
+
+        if (isNoShow || isCancelled) {
+          if (fee > 0 && paid < fee) {
+            totalUnpaidBalance += (fee - paid);
+          }
+        } else {
+          // Standard completed or past stay bill
+          if (total > 0 && paid < total && !['paid', 'refunded'].includes(String(b.bill_status || '').toLowerCase())) {
+            if (['checked_out', 'completed'].includes(String(b.booking_status || '').toLowerCase()) || (!b.booking_id && b.bill_status !== 'paid')) {
+              totalUnpaidBalance += (total - paid);
+            }
+          }
+        }
+      }
+
+      if (totalUnpaidBalance > 0) {
+        return res.status(403).json({
+          conflict: true,
+          has_unpaid_balance: true,
+          outstanding_balance: totalUnpaidBalance,
+          message: `You have an outstanding balance of ₱${totalUnpaidBalance.toLocaleString()} (from an unpaid No-Show service fee or past stay). Please settle your balance with the front desk before creating a new booking.`
+        });
+      }
+    }
+
     // ── Enforce 1-Stay-at-a-Time Rule (Option B: Multiple rooms allowed for same stay) ──
     // A guest who already has an in-progress reservation (pending_payment, pending_approval, confirmed, approved, active, checked_in)
     // can reserve multiple rooms for the same stay dates (family/group trip),

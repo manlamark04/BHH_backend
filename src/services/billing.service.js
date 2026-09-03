@@ -123,8 +123,8 @@ async function getAllBills(req, res) {
       const isCancelledBill = ['cancelled', 'void'].includes(String(b.status || '').toLowerCase());
       const isCancelled = isCancelledBooking || isCancelledActivity || isCancelledMotor || isCancelledBill;
 
-      const isNoShow = String(b.booking_status || '').toLowerCase() === 'no_show';
-      const noShowFee = Number(b.booking_no_show_fee ?? b.cancellation_fee ?? 0);
+      const isNoShow = String(b.booking_status || '').toLowerCase() === 'no_show' || String(b.status || '').toLowerCase() === 'no_show' || Number(b.booking_no_show_fee || 0) > 0 || Number(b.no_show_fee || 0) > 0;
+      const noShowFee = Number(b.booking_no_show_fee ?? b.no_show_fee ?? b.cancellation_fee ?? 0);
 
       // Pending Approval check: linked reservation is still awaiting staff approval (Rooms only)
       const isBookingPendingApproval = Boolean(b.booking_id && ['pending_approval', 'pending', 'requested'].includes(String(b.booking_status || '').toLowerCase()));
@@ -136,17 +136,31 @@ async function getAllBills(req, res) {
       let status = String(b.status || '').toUpperCase();
 
       if (isNoShow) {
-        status = 'NO_SHOW';
         if (noShowFee > 0) {
           remainingBalance = Math.max(0, noShowFee - computedPaid);
+          if (computedPaid >= noShowFee || remainingBalance === 0) {
+            status = 'PAID';
+          } else if (computedPaid > 0) {
+            status = 'PARTIALLY PAID';
+          } else {
+            status = 'NO_SHOW';
+          }
         } else {
+          status = 'PAID';
           remainingBalance = 0;
         }
       } else if (isCancelled) {
-        status = 'CANCELLED';
         if (cancellationFee > 0) {
           remainingBalance = Math.max(0, cancellationFee - computedPaid);
+          if (computedPaid >= cancellationFee || remainingBalance === 0) {
+            status = 'PAID';
+          } else if (computedPaid > 0) {
+            status = 'PARTIALLY PAID';
+          } else {
+            status = 'CANCELLED';
+          }
         } else {
+          status = 'CANCELLED';
           remainingBalance = 0;
         }
       } else if (computedPaid >= totalAmount && totalAmount > 0) {
@@ -371,15 +385,38 @@ async function getMyBills(req, res) {
       const isCancelledBill = ['cancelled', 'void'].includes(String(b.status || '').toLowerCase());
       const isCancelled = isCancelledBooking || isCancelledActivity || isCancelledMotor || isCancelledBill;
 
+      const isNoShow = String(b.booking_status || '').toLowerCase() === 'no_show' || String(b.status || '').toLowerCase() === 'no_show' || Number(b.booking_no_show_fee || 0) > 0 || Number(b.no_show_fee || 0) > 0;
+      const noShowFee = Number(b.booking_no_show_fee ?? b.no_show_fee ?? b.cancellation_fee ?? 0);
       const cancellationFee = Number(b.cancellation_fee ?? b.booking_cancellation_fee ?? 0);
       let remainingBalance = 0;
       let status = String(b.status || '').toUpperCase();
 
-      if (isCancelled) {
-        status = 'CANCELLED';
+      if (isNoShow) {
+        if (noShowFee > 0) {
+          remainingBalance = Math.max(0, noShowFee - computedPaid);
+          if (computedPaid >= noShowFee || remainingBalance === 0) {
+            status = 'PAID';
+          } else if (computedPaid > 0) {
+            status = 'PARTIALLY PAID';
+          } else {
+            status = 'NO_SHOW';
+          }
+        } else {
+          status = 'PAID';
+          remainingBalance = 0;
+        }
+      } else if (isCancelled) {
         if (cancellationFee > 0) {
           remainingBalance = Math.max(0, cancellationFee - computedPaid);
+          if (computedPaid >= cancellationFee || remainingBalance === 0) {
+            status = 'PAID';
+          } else if (computedPaid > 0) {
+            status = 'PARTIALLY PAID';
+          } else {
+            status = 'CANCELLED';
+          }
         } else {
+          status = 'CANCELLED';
           remainingBalance = 0;
         }
       } else if (computedPaid >= totalAmount && totalAmount > 0) {
