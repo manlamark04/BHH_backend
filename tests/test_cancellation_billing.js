@@ -1,6 +1,6 @@
 require('dotenv').config();
-const pool = require('./src/config/db');
-const { cancelRequest } = require('./src/services/request-lifecycle.service');
+const pool = require('../src/config/db');
+const { cancelRequest } = require('../src/services/request-lifecycle.service');
 
 async function test() {
   console.log('--- Running Cancellation Billing Integration Test ---');

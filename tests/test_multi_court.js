@@ -1,7 +1,7 @@
 require('dotenv').config();
-const pool = require('./src/config/db');
-const courtSvc = require('./src/services/court.service');
-const bookingSvc = require('./src/services/booking.service');
+const pool = require('../src/config/db');
+const courtSvc = require('../src/services/court.service');
+const bookingSvc = require('../src/services/booking.service');
 
 async function runTests() {
   console.log('🧪 Starting Multi-Court Pickleball Integration Tests...\n');

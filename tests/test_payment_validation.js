@@ -1,4 +1,4 @@
-const pool = require('./src/config/db');
+const pool = require('../src/config/db');
 
 async function testPaymentValidation() {
   console.log('=== Running Payment Input Validation & Cap Tests ===\n');

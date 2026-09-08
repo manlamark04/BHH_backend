@@ -568,20 +568,25 @@ async function createMotorRental(req, res) {
       });
     }
 
-    // 2. Verify Motorcycle exists and check current status
-    const [motorRows] = await conn.query('SELECT * FROM motorcycles WHERE id = ?', [motor_id]);
+    // Begin Database Transaction with pessimistic row-locking to prevent concurrent double-booking
+    await conn.beginTransaction();
+
+    // 2. Verify Motorcycle exists and lock target row (FOR UPDATE)
+    const [motorRows] = await conn.query('SELECT * FROM motorcycles WHERE id = ? FOR UPDATE', [motor_id]);
     if (!motorRows || motorRows.length === 0) {
+      await conn.rollback();
       return res.status(404).json({ message: 'Motorcycle not found.' });
     }
     const motor = motorRows[0];
 
     if (motor.status !== 'AVAILABLE') {
+      await conn.rollback();
       return res.status(400).json({
         message: `This motorcycle is currently ${motor.status} and cannot be rented.`,
       });
     }
 
-    // 3. Check for reservation date conflicts
+    // 3. Check for reservation date conflicts within the locked transaction
     const [conflictRows] = await conn.query(
       `SELECT id, rental_id, start_datetime, expected_return_datetime 
        FROM motor_rentals 
@@ -596,6 +601,7 @@ async function createMotorRental(req, res) {
     );
 
     if (conflictRows && conflictRows.length > 0) {
+      await conn.rollback();
       return res.status(409).json({
         message: 'This motorcycle is already reserved or rented during the selected period.',
       });
@@ -618,9 +624,6 @@ async function createMotorRental(req, res) {
       duration = Math.max(1, days);
       totalAmount = duration * rate;
     }
-
-    // 5. Begin Database Transaction
-    await conn.beginTransaction();
 
     // Generate unique Rental ID: MTR-YYYY-XXXX
     const rentalId = await generateNextRentalId(conn);
@@ -875,7 +878,17 @@ async function getRentalById(req, res) {
       [rental.id]
     );
 
-    res.json({ rental, audit_logs: auditLogs });
+    // Get damage assessments if any
+    const [damageAssessments] = await pool.query(
+      `SELECT mda.*, staff.full_name AS assessed_by_name, waiver_staff.full_name AS waived_by_name
+       FROM motor_damage_assessments mda
+       JOIN users staff ON mda.assessed_by = staff.id
+       LEFT JOIN users waiver_staff ON mda.waived_by = waiver_staff.id
+       WHERE mda.rental_id = ? ORDER BY mda.id DESC`,
+      [rental.id]
+    );
+
+    res.json({ rental, audit_logs: auditLogs, damage_assessments: damageAssessments });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
@@ -888,7 +901,15 @@ async function processMotorReturn(req, res) {
     const targetRentalId = req.params.id;
     const staffId = req.user.id;
     const staffName = req.user.full_name || req.user.username;
-    const { condition, remarks, maintenance_needed, waive_late_fee, late_fee_override, waiver_reason } = req.body;
+    const {
+      condition,
+      remarks,
+      maintenance_needed,
+      waive_late_fee,
+      late_fee_override,
+      waiver_reason,
+      damage, // { has_damage, severity, description, photos, estimated_repair_cost }
+    } = req.body;
 
     const [rentalRows] = await conn.query(
       `SELECT mr.*, m.rental_rate, m.rate_type, m.late_fee_hourly_rate, m.plate_number, m.brand, m.model 
@@ -907,9 +928,6 @@ async function processMotorReturn(req, res) {
     const expectedReturnTime = new Date(rental.expected_return_datetime);
 
     // Determine hourly late rate:
-    // 1. Motorcycle specific late_fee_hourly_rate if configured
-    // 2. If hourly rental: 1.5x hourly rate
-    // 3. Fallback for daily rental: 1.5x daily rate / 24, with minimum ₱100/hr
     let hourlyLateRate = 100.00;
     if (rental.late_fee_hourly_rate !== null && rental.late_fee_hourly_rate !== undefined && parseFloat(rental.late_fee_hourly_rate) > 0) {
       hourlyLateRate = parseFloat(rental.late_fee_hourly_rate);
@@ -937,10 +955,102 @@ async function processMotorReturn(req, res) {
       }
     }
 
-    const finalAmount = parseFloat(rental.total_amount) + lateFee;
-    const nextMotorStatus = maintenance_needed ? 'MAINTENANCE' : 'AVAILABLE';
+    // Damage assessment handling
+    let damageFee = 0;
+    let damageAssessmentRecord = null;
+    const hasDamage = Boolean(
+      damage &&
+      (damage.has_damage || parseFloat(damage.estimated_repair_cost) > 0 || (damage.description && damage.description.trim()))
+    );
+
+    let nextMotorStatus = maintenance_needed ? 'MAINTENANCE' : 'AVAILABLE';
 
     await conn.beginTransaction();
+
+    if (hasDamage) {
+      const severity = ['minor', 'moderate', 'major', 'total_loss'].includes(damage.severity) ? damage.severity : 'minor';
+      const damageDesc = (damage.description || 'Damage noted upon return inspection.').trim();
+      damageFee = Math.max(0, parseFloat(damage.estimated_repair_cost) || 0);
+
+      // Photos processing
+      const rawPhotos = Array.isArray(damage.photos) ? damage.photos : (damage.photos ? [damage.photos] : []);
+      const savedPhotos = rawPhotos.map((p, idx) => saveBase64Image(p, `damage-${rental.rental_id}-${idx + 1}`));
+
+      // Insert into motor_damage_assessments
+      const [damageRes] = await conn.query(
+        `INSERT INTO motor_damage_assessments 
+          (rental_id, motor_id, customer_id, assessed_by, severity, description, photos, estimated_repair_cost, charge_amount, status, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'billed', NOW())`,
+        [
+          rental.id,
+          rental.motor_id,
+          rental.customer_id,
+          staffId,
+          severity,
+          damageDesc,
+          JSON.stringify(savedPhotos),
+          damageFee,
+          damageFee,
+        ]
+      );
+
+      const damageAssessmentId = damageRes.insertId;
+
+      // When damage is documented, vehicle MUST be flagged MAINTENANCE until repairs cleared
+      nextMotorStatus = 'MAINTENANCE';
+
+      // Find associated bill
+      const [billRows] = await conn.query(
+        `SELECT id, bill_number, total_amount, paid_amount 
+         FROM bills 
+         WHERE motor_rental_id = ? OR bill_number = ? 
+         ORDER BY id DESC LIMIT 1`,
+        [rental.id, `BILL-${rental.rental_id}`]
+      );
+
+      if (billRows.length > 0 && damageFee > 0) {
+        const b = billRows[0];
+        // Insert line item
+        await conn.query(
+          `INSERT INTO bill_line_items (bill_id, description, quantity, unit_price)
+           VALUES (?, ?, 1, ?)`,
+          [
+            b.id,
+            `Damage Fee: ${damageDesc} (${severity.toUpperCase()}) — ${rental.rental_id}`,
+            damageFee,
+          ]
+        );
+
+        // Update bill totals
+        const newTotal = parseFloat(b.total_amount) + damageFee;
+        const paidAmt = parseFloat(b.paid_amount || 0);
+        const newStatus = paidAmt >= newTotal ? 'paid' : (paidAmt > 0 ? 'partially_paid' : 'unpaid');
+
+        await conn.query(
+          `UPDATE bills 
+           SET total_amount = ?,
+               status = ?,
+               updated_at = NOW()
+           WHERE id = ?`,
+          [newTotal, newStatus, b.id]
+        );
+
+        await conn.query(
+          `UPDATE motor_damage_assessments SET bill_id = ? WHERE id = ?`,
+          [b.id, damageAssessmentId]
+        );
+      }
+
+      damageAssessmentRecord = {
+        id: damageAssessmentId,
+        severity,
+        description: damageDesc,
+        photos: savedPhotos,
+        charge_amount: damageFee,
+      };
+    }
+
+    const finalAmount = parseFloat(rental.total_amount) + lateFee + damageFee;
 
     // 1. Update motor_rentals
     await conn.query(
@@ -952,14 +1062,28 @@ async function processMotorReturn(req, res) {
            hourly_late_rate = ?,
            late_fee_waived = ?,
            late_fee_waiver_reason = ?,
+           has_damage = ?,
+           damage_fee = ?,
            final_amount = ?,
            returned_by = ?,
            updated_at = NOW()
        WHERE id = ?`,
-      [actualReturnTime, lateFee, hoursLate, hourlyLateRate, isWaived, waiverReason, finalAmount, staffId, rental.id]
+      [
+        actualReturnTime,
+        lateFee,
+        hoursLate,
+        hourlyLateRate,
+        isWaived,
+        waiverReason,
+        hasDamage ? 1 : 0,
+        damageFee,
+        finalAmount,
+        staffId,
+        rental.id,
+      ]
     );
 
-    // 2. Update motorcycle status to AVAILABLE (or MAINTENANCE)
+    // 2. Update motorcycle status
     await conn.query(
       `UPDATE motorcycles SET status = ?, updated_at = NOW() WHERE id = ?`,
       [nextMotorStatus, rental.motor_id]
@@ -967,20 +1091,25 @@ async function processMotorReturn(req, res) {
 
     // 3. Create Audit Log
     const returnRemarks = [
-      remarks || 'Motorcycle returned in good order.',
+      remarks || 'Motorcycle returned.',
       isWaived
         ? `Late fee waived (${hoursLate} hrs overdue) — Reason: ${waiverReason}`
         : lateFee > 0
         ? `Late return penalty applied: ₱${lateFee.toLocaleString()} (${hoursLate} hr${hoursLate > 1 ? 's' : ''} late × ₱${hourlyLateRate}/hr)`
         : null,
-      maintenance_needed ? 'Motorcycle routed to MAINTENANCE.' : 'Motorcycle status set to AVAILABLE.',
+      hasDamage
+        ? `Damage assessed: ₱${damageFee.toLocaleString()} (${damageAssessmentRecord.severity.toUpperCase()}) — ${damageAssessmentRecord.description}`
+        : null,
+      nextMotorStatus === 'MAINTENANCE'
+        ? 'Motorcycle placed into MAINTENANCE status for repair/inspection.'
+        : 'Motorcycle returned to AVAILABLE status.',
     ].filter(Boolean).join(' | ');
 
     await logMotorRentalAction(conn, {
       rentalId: rental.id,
       rentalUniqueId: rental.rental_id,
       motorId: rental.motor_id,
-      action: 'Motorcycle returned',
+      action: hasDamage ? 'Motorcycle returned with damage' : 'Motorcycle returned',
       performedBy: staffId,
       performedByName: staffName,
       performedByRole: req.user.role,
@@ -998,12 +1127,17 @@ async function processMotorReturn(req, res) {
     );
 
     res.json({
-      message: 'Motorcycle return processed successfully!',
+      message: hasDamage
+        ? 'Motorcycle return & damage assessment processed successfully!'
+        : 'Motorcycle return processed successfully!',
       rental: completedRows[0],
       hours_late: hoursLate,
       hourly_late_rate: hourlyLateRate,
       late_fee: lateFee,
       late_fee_waived: isWaived,
+      has_damage: hasDamage,
+      damage_fee: damageFee,
+      damage_assessment: damageAssessmentRecord,
       final_amount: finalAmount,
       motorcycle_status: nextMotorStatus,
     });
@@ -1013,6 +1147,238 @@ async function processMotorReturn(req, res) {
     res.status(500).json({ message: err.message });
   } finally {
     conn.release();
+  }
+}
+
+/** POST /api/motorcycles/rentals/:id/pickup-inspection — Staff/Admin: Save Pickup Inspection */
+async function savePickupInspection(req, res) {
+  const conn = await pool.getConnection();
+  try {
+    const targetRentalId = req.params.id;
+    const staffId = req.user.id;
+    const staffName = req.user.full_name || req.user.username;
+    const { checklist, photos, notes } = req.body;
+
+    const [rentalRows] = await conn.query(
+      `SELECT id, rental_id, motor_id, status FROM motor_rentals WHERE id = ? OR rental_id = ?`,
+      [targetRentalId, targetRentalId]
+    );
+    if (!rentalRows || rentalRows.length === 0) {
+      return res.status(404).json({ message: 'Rental not found.' });
+    }
+    const rental = rentalRows[0];
+
+    const rawPhotos = Array.isArray(photos) ? photos : (photos ? [photos] : []);
+    const savedPhotos = rawPhotos.map((p, idx) => saveBase64Image(p, `pickup-${rental.rental_id}-${idx + 1}`));
+
+    const checklistObj = checklist || {};
+    if (notes) checklistObj.notes = notes;
+
+    await conn.query(
+      `UPDATE motor_rentals 
+       SET pickup_checklist = ?,
+           pickup_photos = ?,
+           pickup_inspected_by = ?,
+           pickup_inspected_at = NOW(),
+           updated_at = NOW()
+       WHERE id = ?`,
+      [JSON.stringify(checklistObj), JSON.stringify(savedPhotos), staffId, rental.id]
+    );
+
+    await logMotorRentalAction(conn, {
+      rentalId: rental.id,
+      rentalUniqueId: rental.rental_id,
+      motorId: rental.motor_id,
+      action: 'Pickup condition documented',
+      performedBy: staffId,
+      performedByName: staffName,
+      performedByRole: req.user.role,
+      remarks: `Pickup baseline condition recorded with ${savedPhotos.length} photo(s).`,
+    });
+
+    res.json({
+      message: 'Pickup condition inspection saved successfully.',
+      rental_id: rental.rental_id,
+      pickup_checklist: checklistObj,
+      pickup_photos: savedPhotos,
+    });
+  } catch (err) {
+    console.error('Save pickup inspection error:', err);
+    res.status(500).json({ message: err.message });
+  } finally {
+    conn.release();
+  }
+}
+
+/** PATCH /api/motorcycles/rentals/:id/damage/waive — Staff/Admin: Waive or adjust damage fee */
+async function waiveDamageFee(req, res) {
+  const conn = await pool.getConnection();
+  try {
+    const targetRentalId = req.params.id;
+    const staffId = req.user.id;
+    const staffName = req.user.full_name || req.user.username;
+    const { reason, adjust_amount } = req.body;
+
+    if (!reason || !reason.trim()) {
+      return res.status(400).json({ message: 'A justification reason is required to waive or adjust a damage fee.' });
+    }
+
+    const [rentalRows] = await conn.query(
+      `SELECT id, rental_id, motor_id, total_amount, late_fee, damage_fee, final_amount, status 
+       FROM motor_rentals WHERE id = ? OR rental_id = ?`,
+      [targetRentalId, targetRentalId]
+    );
+    if (!rentalRows || rentalRows.length === 0) {
+      return res.status(404).json({ message: 'Rental not found.' });
+    }
+    const rental = rentalRows[0];
+    const currentDamageFee = parseFloat(rental.damage_fee || 0);
+
+    if (currentDamageFee <= 0) {
+      return res.status(400).json({ message: 'This rental does not have an active damage fee to waive.' });
+    }
+
+    const isAdjustment = adjust_amount !== undefined && adjust_amount !== null && !isNaN(parseFloat(adjust_amount));
+    const newDamageFee = isAdjustment ? Math.max(0, parseFloat(adjust_amount)) : 0;
+    const feeDifference = currentDamageFee - newDamageFee; // amount to deduct from bill
+
+    await conn.beginTransaction();
+
+    // 1. Update motor_damage_assessments
+    await conn.query(
+      `UPDATE motor_damage_assessments 
+       SET status = ?,
+           charge_amount = ?,
+           waived_by = ?,
+           waived_at = NOW(),
+           waiver_reason = ?,
+           updated_at = NOW()
+       WHERE rental_id = ? AND status = 'billed'`,
+      [isAdjustment ? 'adjusted' : 'waived', newDamageFee, staffId, reason.trim(), rental.id]
+    );
+
+    // 2. Update motor_rentals
+    const newFinalAmount = parseFloat(rental.final_amount) - feeDifference;
+    await conn.query(
+      `UPDATE motor_rentals 
+       SET damage_fee = ?,
+           damage_fee_waived = ?,
+           damage_fee_waiver_reason = ?,
+           final_amount = ?,
+           updated_at = NOW()
+       WHERE id = ?`,
+      [newDamageFee, !isAdjustment, reason.trim(), newFinalAmount, rental.id]
+    );
+
+    // 3. Update Bill
+    const [billRows] = await conn.query(
+      `SELECT id, total_amount, paid_amount 
+       FROM bills 
+       WHERE motor_rental_id = ? OR bill_number = ? 
+       ORDER BY id DESC LIMIT 1`,
+      [rental.id, `BILL-${rental.rental_id}`]
+    );
+
+    if (billRows.length > 0) {
+      const b = billRows[0];
+      // Append waiver line item
+      await conn.query(
+        `INSERT INTO bill_line_items (bill_id, description, quantity, unit_price)
+         VALUES (?, ?, 1, ?)`,
+        [
+          b.id,
+          `Damage Fee ${isAdjustment ? 'Adjustment' : 'Waiver'}: ${reason.trim()} — ${rental.rental_id}`,
+          -feeDifference,
+        ]
+      );
+
+      const updatedTotal = Math.max(0, parseFloat(b.total_amount) - feeDifference);
+      const paidAmt = parseFloat(b.paid_amount || 0);
+      const updatedStatus = paidAmt >= updatedTotal ? 'paid' : (paidAmt > 0 ? 'partially_paid' : 'unpaid');
+
+      await conn.query(
+        `UPDATE bills 
+         SET total_amount = ?,
+             status = ?,
+             updated_at = NOW()
+         WHERE id = ?`,
+        [updatedTotal, updatedStatus, b.id]
+      );
+    }
+
+    // 4. Audit log
+    await logMotorRentalAction(conn, {
+      rentalId: rental.id,
+      rentalUniqueId: rental.rental_id,
+      motorId: rental.motor_id,
+      action: isAdjustment ? 'Damage fee adjusted' : 'Damage fee waived',
+      performedBy: staffId,
+      performedByName: staffName,
+      performedByRole: req.user.role,
+      remarks: `${isAdjustment ? `Damage fee adjusted from ₱${currentDamageFee} to ₱${newDamageFee}` : `Damage fee (₱${currentDamageFee}) completely waived`}. Reason: ${reason.trim()}`,
+    });
+
+    await conn.commit();
+
+    res.json({
+      message: isAdjustment ? 'Damage fee adjusted successfully.' : 'Damage fee waived successfully.',
+      rental_id: rental.rental_id,
+      previous_fee: currentDamageFee,
+      new_fee: newDamageFee,
+      final_amount: newFinalAmount,
+      waiver_reason: reason.trim(),
+    });
+  } catch (err) {
+    await conn.rollback();
+    console.error('Waive damage fee error:', err);
+    res.status(500).json({ message: err.message });
+  } finally {
+    conn.release();
+  }
+}
+
+/** GET /api/motorcycles/damage-history — Staff/Admin: Get fleet damage history */
+async function getDamageHistory(req, res) {
+  try {
+    const { motor_id, severity, status } = req.query;
+    let query = `
+      SELECT 
+        mda.*,
+        m.brand, m.model, m.plate_number, m.image_url AS motor_image_url,
+        u.full_name AS customer_name, u.email AS customer_email, u.phone AS customer_phone, u.unique_id AS customer_unique_id,
+        staff.full_name AS assessed_by_name,
+        waiver_staff.full_name AS waived_by_name,
+        mr.rental_id, mr.start_datetime, mr.actual_return_datetime
+      FROM motor_damage_assessments mda
+      JOIN motorcycles m ON mda.motor_id = m.id
+      JOIN users u ON mda.customer_id = u.id
+      JOIN users staff ON mda.assessed_by = staff.id
+      LEFT JOIN users waiver_staff ON mda.waived_by = waiver_staff.id
+      JOIN motor_rentals mr ON mda.rental_id = mr.id
+      WHERE 1=1
+    `;
+    const params = [];
+
+    if (motor_id) {
+      query += ` AND mda.motor_id = ?`;
+      params.push(motor_id);
+    }
+    if (severity) {
+      query += ` AND mda.severity = ?`;
+      params.push(severity);
+    }
+    if (status) {
+      query += ` AND mda.status = ?`;
+      params.push(status);
+    }
+
+    query += ` ORDER BY mda.created_at DESC LIMIT 100`;
+
+    const [rows] = await pool.query(query, params);
+    res.json(rows);
+  } catch (err) {
+    console.error('getDamageHistory error:', err);
+    res.status(500).json({ message: err.message });
   }
 }
 
@@ -1099,6 +1465,9 @@ module.exports = {
   getAllRentals,
   getRentalById,
   processMotorReturn,
+  savePickupInspection,
+  waiveDamageFee,
+  getDamageHistory,
   cancelMotorRental,
   approveMotorRental,
   rejectMotorRental,

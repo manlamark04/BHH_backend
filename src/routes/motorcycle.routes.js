@@ -44,11 +44,34 @@ router.patch('/rentals/:id/reject',
   svc.rejectMotorRental
 );
 
-// Staff/Admin: Process return
+// Staff/Admin: Document pickup condition inspection
+router.post('/rentals/:id/pickup-inspection',
+  authenticate,
+  requireRole('staff', 'admin'),
+  svc.savePickupInspection
+);
+
+// Staff/Admin: Process return (supports damage assessment)
 router.post('/rentals/:id/return',
   authenticate,
   requireRole('staff', 'admin'),
   svc.processMotorReturn
+);
+
+// Staff/Admin: Waive or adjust damage fee
+router.patch('/rentals/:id/damage/waive',
+  authenticate,
+  requireRole('staff', 'admin'),
+  [body('reason').trim().notEmpty().withMessage('Waiver justification reason is required.')],
+  validate,
+  svc.waiveDamageFee
+);
+
+// Staff/Admin: Fleet damage assessment history
+router.get('/damage-history',
+  authenticate,
+  requireRole('staff', 'admin'),
+  svc.getDamageHistory
 );
 
 // Cancel rental

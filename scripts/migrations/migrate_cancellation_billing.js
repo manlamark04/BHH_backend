@@ -1,5 +1,5 @@
 require('dotenv').config();
-const pool = require('./src/config/db');
+const pool = require('../../src/config/db');
 
 async function migrate() {
   console.log('--- Starting Cancellation Billing Migration ---');

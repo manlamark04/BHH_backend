@@ -1,4 +1,4 @@
-const pool = require('./src/config/db');
+const pool = require('../src/config/db');
 
 async function runTests() {
   console.log('=== Running Motor Rent Calculated Late Fee Integration Tests ===\n');

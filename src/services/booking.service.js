@@ -379,147 +379,159 @@ async function createBooking(req, res) {
       }
     }
 
-    // Check room availability (works for both booking types via datetime overlap)
-    // Only confirmed, checked-in, or approved bookings block other guests from requesting the room.
-    // Requests sitting in pending_approval leave the room bookable for other guests.
-    const [overlap] = await pool.query(`
-      SELECT id FROM bookings 
-      WHERE room_id = ? 
-        AND status IN ('confirmed', 'checked_in', 'approved', 'active')
-        AND (check_in < ? AND check_out > ?)
-    `, [room_id, effectiveCheckOut, effectiveCheckIn]);
+    const conn = await pool.getConnection();
+    try {
+      await conn.beginTransaction();
 
-    if (overlap.length > 0) {
-      const conflictMsg = isShortTime
-        ? 'Room is already booked during the selected time window.'
-        : `Room is already reserved for the selected dates (${check_in} to ${check_out}).`;
-      return res.status(409).json({ message: conflictMsg });
-    }
+      // Lock room row (FOR UPDATE) to prevent concurrent double-booking
+      const [roomRows] = await conn.query('SELECT * FROM rooms WHERE id = ? FOR UPDATE', [room_id]);
+      if (roomRows.length === 0) {
+        await conn.rollback();
+        return res.status(404).json({ message: 'Room not found.' });
+      }
+      const room = roomRows[0];
 
-    // Get room details for rate
-    const [roomRows] = await pool.query('SELECT * FROM rooms WHERE id = ?', [room_id]);
-    if (roomRows.length === 0) {
-      return res.status(404).json({ message: 'Room not found.' });
-    }
-    const room = roomRows[0];
+      // Check room availability within the locked transaction
+      const [overlap] = await conn.query(`
+        SELECT id FROM bookings 
+        WHERE room_id = ? 
+          AND status IN ('confirmed', 'checked_in', 'approved', 'active')
+          AND (check_in < ? AND check_out > ?)
+      `, [room_id, effectiveCheckOut, effectiveCheckIn]);
 
-    // ── Price calculation ──
-    let nights, totalPrice, lineDesc;
-    if (isShortTime) {
-      const dur = parseInt(duration_hours, 10);
-      const hourlyRate = (Number(room.rate_per_night) / 24) * SHORT_TIME_MULTIPLIER;
-      nights = dur;
-      totalPrice = Math.round(hourlyRate * dur * 100) / 100;
-      lineDesc = `Short Time - ${room.room_type} Room (${room.room_number}) - ${dur} Hour(s)`;
-    } else {
-      nights = Math.max(1, Math.ceil((new Date(check_out) - new Date(check_in)) / (1000 * 60 * 60 * 24)));
-      totalPrice = Number(room.rate_per_night) * nights;
-      lineDesc = `${room.room_type} Room (${room.room_number}) - ${nights} Night(s)`;
-    }
+      if (overlap.length > 0) {
+        await conn.rollback();
+        const conflictMsg = isShortTime
+          ? 'Room is already booked during the selected time window.'
+          : `Room is already reserved for the selected dates (${check_in} to ${check_out}).`;
+        return res.status(409).json({ message: conflictMsg });
+      }
 
-    // Set payment deadline (e.g. NOW + 24 hours)
-    const paymentDeadline = requestLifecycle.getPaymentDeadline();
-    let initialStatus = 'pending_approval';
+      // ── Price calculation ──
+      let nights, totalPrice, lineDesc;
+      if (isShortTime) {
+        const dur = parseInt(duration_hours, 10);
+        const hourlyRate = (Number(room.rate_per_night) / 24) * SHORT_TIME_MULTIPLIER;
+        nights = dur;
+        totalPrice = Math.round(hourlyRate * dur * 100) / 100;
+        lineDesc = `Short Time - ${room.room_type} Room (${room.room_number}) - ${dur} Hour(s)`;
+      } else {
+        nights = Math.max(1, Math.ceil((new Date(check_out) - new Date(check_in)) / (1000 * 60 * 60 * 24)));
+        totalPrice = Number(room.rate_per_night) * nights;
+        lineDesc = `${room.room_type} Room (${room.room_number}) - ${nights} Night(s)`;
+      }
 
-    // Insert booking
-    const [result] = await pool.query(`
-      INSERT INTO bookings (customer_id, room_id, booking_type, check_in, check_out, check_in_time, duration_hours, status, notes, payment_deadline, created_by, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
-    `, [
-      targetCustomerId, room_id,
-      isShortTime ? 'short_time' : 'per_night',
-      effectiveCheckIn, effectiveCheckOut,
-      isShortTime ? check_in_time : null,
-      isShortTime ? parseInt(duration_hours, 10) : null,
-      initialStatus, notes || null, paymentDeadline, createdBy,
-    ]);
+      // Set payment deadline (e.g. NOW + 24 hours)
+      const paymentDeadline = requestLifecycle.getPaymentDeadline();
+      let initialStatus = 'pending_approval';
 
-    const newBookingId = result.insertId;
-    const currentYear = new Date().getFullYear();
-    const bookingRef = `BK-${currentYear}-${String(newBookingId).padStart(4, '0')}`;
+      // Insert booking
+      const [result] = await conn.query(`
+        INSERT INTO bookings (customer_id, room_id, booking_type, check_in, check_out, check_in_time, duration_hours, status, notes, payment_deadline, created_by, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
+      `, [
+        targetCustomerId, room_id,
+        isShortTime ? 'short_time' : 'per_night',
+        effectiveCheckIn, effectiveCheckOut,
+        isShortTime ? check_in_time : null,
+        isShortTime ? parseInt(duration_hours, 10) : null,
+        initialStatus, notes || null, paymentDeadline, createdBy,
+      ]);
 
-    // Always create initial bill
-    const billNumber = `BILL-${currentYear}-${String(newBookingId).padStart(4, '0')}`;
-    const initialPayAmount = initial_payment ? Number(initial_payment) : 0;
+      const newBookingId = result.insertId;
+      const currentYear = new Date().getFullYear();
+      const bookingRef = `BK-${currentYear}-${String(newBookingId).padStart(4, '0')}`;
 
-    const [billRes] = await pool.query(`
-      INSERT INTO bills (bill_number, customer_id, booking_id, total_amount, paid_amount, status, issued_by, issued_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, NOW())
-    `, [
-      billNumber,
-      targetCustomerId,
-      newBookingId,
-      totalPrice,
-      initialPayAmount,
-      initialPayAmount >= totalPrice ? 'paid' : (initialPayAmount > 0 ? 'partially_paid' : 'unpaid'),
-      req.user.id || targetCustomerId,
-    ]);
+      // Always create initial bill
+      const billNumber = `BILL-${currentYear}-${String(newBookingId).padStart(4, '0')}`;
+      const initialPayAmount = initial_payment ? Number(initial_payment) : 0;
 
-    const billId = billRes.insertId;
+      const [billRes] = await conn.query(`
+        INSERT INTO bills (bill_number, customer_id, booking_id, total_amount, paid_amount, status, issued_by, issued_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, NOW())
+      `, [
+        billNumber,
+        targetCustomerId,
+        newBookingId,
+        totalPrice,
+        initialPayAmount,
+        initialPayAmount >= totalPrice ? 'paid' : (initialPayAmount > 0 ? 'partially_paid' : 'unpaid'),
+        req.user.id || targetCustomerId,
+      ]);
 
-    // Insert bill line item
-    const unitPrice = isShortTime
-      ? Math.round(((Number(room.rate_per_night) / 24) * SHORT_TIME_MULTIPLIER) * 100) / 100
-      : Number(room.rate_per_night);
-    await pool.query(`
-      INSERT INTO bill_line_items (bill_id, description, quantity, unit_price)
-      VALUES (?, ?, ?, ?)
-    `, [billId, lineDesc, nights, unitPrice]);
+      const billId = billRes.insertId;
 
-    // If initial payment provided, record it
-    if (initialPayAmount > 0) {
-      const validMethod = ['cash', 'card', 'ewallet', 'gcash', 'maya', 'bank_transfer'].includes(String(payment_method || '').toLowerCase())
-        ? String(payment_method).toLowerCase()
-        : 'cash';
+      // Insert bill line item
+      const unitPrice = isShortTime
+        ? Math.round(((Number(room.rate_per_night) / 24) * SHORT_TIME_MULTIPLIER) * 100) / 100
+        : Number(room.rate_per_night);
+      await conn.query(`
+        INSERT INTO bill_line_items (bill_id, description, quantity, unit_price)
+        VALUES (?, ?, ?, ?)
+      `, [billId, lineDesc, nights, unitPrice]);
 
-      await pool.query(`
-        INSERT INTO payments (bill_id, amount, method, received_by, paid_at, notes)
-        VALUES (?, ?, ?, ?, NOW(), 'Initial reservation payment')
-      `, [billId, initialPayAmount, validMethod, req.user.id]);
+      // If initial payment provided, record it
+      if (initialPayAmount > 0) {
+        const validMethod = ['cash', 'card', 'ewallet', 'gcash', 'maya', 'bank_transfer'].includes(String(payment_method || '').toLowerCase())
+          ? String(payment_method).toLowerCase()
+          : 'cash';
 
-      // Check payment gate & auto-transition if staff
-      const payTransition = await requestLifecycle.handlePaymentReceived('booking', newBookingId, {
-        userId: req.user.id,
-        userName: req.user.full_name || req.user.username,
+        await conn.query(`
+          INSERT INTO payments (bill_id, amount, method, received_by, paid_at, notes)
+          VALUES (?, ?, ?, ?, NOW(), 'Initial reservation payment')
+        `, [billId, initialPayAmount, validMethod, req.user.id]);
+
+        // Check payment gate & auto-transition if staff
+        const payTransition = await requestLifecycle.handlePaymentReceived('booking', newBookingId, {
+          userId: req.user.id,
+          userName: req.user.full_name || req.user.username,
+        });
+
+        if (payTransition.transitioned) {
+          initialStatus = payTransition.newStatus;
+        }
+      }
+
+      // Update room status:
+      if (initialStatus === 'checked_in') {
+        await conn.query("UPDATE rooms SET status = 'occupied', updated_at = NOW() WHERE id = ?", [room_id]);
+      } else if (initialStatus === 'confirmed') {
+        await conn.query("UPDATE rooms SET status = 'reserved', updated_at = NOW() WHERE id = ?", [room_id]);
+      }
+
+      // Audit log creation
+      await requestLifecycle.logAudit(conn, {
+        entityType: 'booking',
+        entityId: newBookingId,
+        fromStatus: null,
+        toStatus: initialStatus,
+        performedBy: req.user.id,
+        performedByName: req.user.full_name || req.user.username,
+        triggerType: 'manual',
+        reason: isShortTime
+          ? `Short-time booking requested (${duration_hours}h). Status: ${initialStatus}.`
+          : `Room reservation created. Status: ${initialStatus}.`,
+        metadata: { totalPrice, paymentDeadline, booking_type: isShortTime ? 'short_time' : 'per_night', status: initialStatus },
       });
 
-      if (payTransition.transitioned) {
-        initialStatus = payTransition.newStatus;
+      await conn.commit();
+
+      res.status(201).json({
+        id: newBookingId,
+        booking_ref: bookingRef,
+        total_price: totalPrice,
+        status: initialStatus.toUpperCase(),
+        payment_deadline: paymentDeadline,
+        message: 'Booking created successfully.',
+      });
+    } catch (err) {
+      if (conn) {
+        try { await conn.rollback(); } catch (_) {}
       }
+      throw err;
+    } finally {
+      if (conn) conn.release();
     }
-
-    // Update room status:
-    // When a guest submits a reservation request, the room remains 'available'.
-    // Only when confirmed or checked in does it flip to 'reserved' or 'occupied'.
-    if (initialStatus === 'checked_in') {
-      await pool.query("UPDATE rooms SET status = 'occupied', updated_at = NOW() WHERE id = ?", [room_id]);
-    } else if (initialStatus === 'confirmed') {
-      await pool.query("UPDATE rooms SET status = 'reserved', updated_at = NOW() WHERE id = ?", [room_id]);
-    }
-
-    // Audit log creation
-    await requestLifecycle.logAudit(pool, {
-      entityType: 'booking',
-      entityId: newBookingId,
-      fromStatus: null,
-      toStatus: initialStatus,
-      performedBy: req.user.id,
-      performedByName: req.user.full_name || req.user.username,
-      triggerType: 'manual',
-      reason: isShortTime
-        ? `Short-time booking requested (${duration_hours}h). Status: ${initialStatus}.`
-        : `Room reservation created. Status: ${initialStatus}.`,
-      metadata: { totalPrice, paymentDeadline, booking_type: isShortTime ? 'short_time' : 'per_night', status: initialStatus },
-    });
-
-    res.status(201).json({
-      id: newBookingId,
-      booking_ref: bookingRef,
-      total_price: totalPrice,
-      status: initialStatus.toUpperCase(),
-      payment_deadline: paymentDeadline,
-      message: 'Booking created successfully.',
-    });
   } catch (err) {
     console.error('createBooking error:', err);
     res.status(500).json({ message: err.message });
@@ -1080,65 +1092,36 @@ async function createRental(req, res) {
       String(activity.name || '').toLowerCase().includes('pickleball') ||
       String(activity.name || '').toLowerCase().includes('court');
 
-    let assignedCourt = null;
-    let unitRate = Number(activity.price_per_unit);
+    const conn = await pool.getConnection();
+    try {
+      await conn.beginTransaction();
 
-    if (isPickleball) {
-      // Fetch all active courts
-      const [allCourts] = await pool.query(
-        "SELECT * FROM courts WHERE status != 'INACTIVE' ORDER BY court_code ASC, id ASC"
-      );
+      let assignedCourt = null;
+      let unitRate = Number(activity.price_per_unit);
 
-      if (allCourts.length > 0) {
-        if (court_id && court_id !== 'any' && court_id !== 'auto' && court_id !== 0) {
-          // Specific court requested
-          const targetCourt = allCourts.find((c) => Number(c.id) === Number(court_id));
-          if (!targetCourt) {
-            return res.status(404).json({ message: 'The specified Pickleball Court does not exist or is inactive.' });
-          }
-          if (targetCourt.status === 'MAINTENANCE') {
-            return res.status(400).json({
-              message: `${targetCourt.name} is currently undergoing scheduled maintenance and cannot be reserved.`
-            });
-          }
+      if (isPickleball) {
+        // Fetch and lock all active courts in consistent order to prevent concurrent duplicate assignments
+        const [allCourts] = await conn.query(
+          "SELECT * FROM courts WHERE status != 'INACTIVE' ORDER BY court_code ASC, id ASC FOR UPDATE"
+        );
 
-          // Check conflict strictly for this court
-          const [courtConflicts] = await pool.query(`
-            SELECT ar.id, ar.start_time, ar.end_time, u.full_name AS customer_name, c.name AS court_name
-            FROM activity_rentals ar
-            LEFT JOIN users u ON u.id = ar.customer_id
-            LEFT JOIN courts c ON c.id = ar.court_id
-            WHERE ar.court_id = ?
-              AND ar.status NOT IN ('cancelled', 'completed', 'rejected')
-              AND (ar.start_time < ? AND ar.end_time > ?)
-            ORDER BY ar.start_time ASC
-          `, [targetCourt.id, sqlEndTime, sqlStartTime]);
+        if (allCourts.length > 0) {
+          if (court_id && court_id !== 'any' && court_id !== 'auto' && court_id !== 0) {
+            // Specific court requested
+            const targetCourt = allCourts.find((c) => Number(c.id) === Number(court_id));
+            if (!targetCourt) {
+              await conn.rollback();
+              return res.status(404).json({ message: 'The specified Pickleball Court does not exist or is inactive.' });
+            }
+            if (targetCourt.status === 'MAINTENANCE') {
+              await conn.rollback();
+              return res.status(400).json({
+                message: `${targetCourt.name} is currently undergoing scheduled maintenance and cannot be reserved.`
+              });
+            }
 
-          if (courtConflicts.length > 0) {
-            const conflict = courtConflicts[0];
-            const conflictStart = new Date(conflict.start_time).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
-            const conflictEnd = new Date(conflict.end_time).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
-            return res.status(409).json({
-              conflict: true,
-              conflicting_booking: conflict,
-              message: `${targetCourt.name} is already booked from ${conflictStart} to ${conflictEnd}. Please select another start time or choose Court B / Any available court.`
-            });
-          }
-
-          assignedCourt = targetCourt;
-          unitRate = Number(targetCourt.hourly_rate || activity.price_per_unit);
-        } else {
-          // "Any Available Court" / Auto-assign: Evaluate courts in order (Court A first, then Court B, etc.)
-          const availableCourts = allCourts.filter((c) => c.status !== 'MAINTENANCE');
-          if (availableCourts.length === 0) {
-            return res.status(400).json({ message: 'All pickleball courts are currently closed for maintenance.' });
-          }
-
-          let candidateCourt = null;
-          let earliestConflict = null;
-
-          for (const court of availableCourts) {
-            const [courtConflicts] = await pool.query(`
+            // Check conflict strictly for this court within locked transaction
+            const [courtConflicts] = await conn.query(`
               SELECT ar.id, ar.start_time, ar.end_time, u.full_name AS customer_name, c.name AS court_name
               FROM activity_rentals ar
               LEFT JOIN users u ON u.id = ar.customer_id
@@ -1147,146 +1130,197 @@ async function createRental(req, res) {
                 AND ar.status NOT IN ('cancelled', 'completed', 'rejected')
                 AND (ar.start_time < ? AND ar.end_time > ?)
               ORDER BY ar.start_time ASC
-            `, [court.id, sqlEndTime, sqlStartTime]);
+            `, [targetCourt.id, sqlEndTime, sqlStartTime]);
 
-            if (courtConflicts.length === 0) {
-              candidateCourt = court;
-              break;
-            } else if (!earliestConflict) {
-              earliestConflict = courtConflicts[0];
+            if (courtConflicts.length > 0) {
+              await conn.rollback();
+              const conflict = courtConflicts[0];
+              const conflictStart = new Date(conflict.start_time).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
+              const conflictEnd = new Date(conflict.end_time).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
+              return res.status(409).json({
+                conflict: true,
+                conflicting_booking: conflict,
+                message: `${targetCourt.name} is already booked from ${conflictStart} to ${conflictEnd}. Please select another start time or choose Court B / Any available court.`
+              });
             }
-          }
 
-          if (!candidateCourt) {
-            const conflictStart = earliestConflict
-              ? new Date(earliestConflict.start_time).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true })
-              : '';
-            const conflictEnd = earliestConflict
-              ? new Date(earliestConflict.end_time).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true })
-              : '';
-            return res.status(409).json({
-              conflict: true,
-              conflicting_booking: earliestConflict,
-              message: `All regulation courts (Court A & Court B) are fully booked for this time window (${conflictStart} to ${conflictEnd}). Please select another time or duration.`
-            });
-          }
+            assignedCourt = targetCourt;
+            unitRate = Number(targetCourt.hourly_rate || activity.price_per_unit);
+          } else {
+            // "Any Available Court" / Auto-assign: Evaluate courts in order (Court A first, then Court B, etc.)
+            const availableCourts = allCourts.filter((c) => c.status !== 'MAINTENANCE');
+            if (availableCourts.length === 0) {
+              await conn.rollback();
+              return res.status(400).json({ message: 'All pickleball courts are currently closed for maintenance.' });
+            }
 
-          assignedCourt = candidateCourt;
-          unitRate = Number(candidateCourt.hourly_rate || activity.price_per_unit);
+            let candidateCourt = null;
+            let earliestConflict = null;
+
+            for (const court of availableCourts) {
+              const [courtConflicts] = await conn.query(`
+                SELECT ar.id, ar.start_time, ar.end_time, u.full_name AS customer_name, c.name AS court_name
+                FROM activity_rentals ar
+                LEFT JOIN users u ON u.id = ar.customer_id
+                LEFT JOIN courts c ON c.id = ar.court_id
+                WHERE ar.court_id = ?
+                  AND ar.status NOT IN ('cancelled', 'completed', 'rejected')
+                  AND (ar.start_time < ? AND ar.end_time > ?)
+                ORDER BY ar.start_time ASC
+              `, [court.id, sqlEndTime, sqlStartTime]);
+
+              if (courtConflicts.length === 0) {
+                candidateCourt = court;
+                break;
+              } else if (!earliestConflict) {
+                earliestConflict = courtConflicts[0];
+              }
+            }
+
+            if (!candidateCourt) {
+              await conn.rollback();
+              const conflictStart = earliestConflict
+                ? new Date(earliestConflict.start_time).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true })
+                : '';
+              const conflictEnd = earliestConflict
+                ? new Date(earliestConflict.end_time).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true })
+                : '';
+              return res.status(409).json({
+                conflict: true,
+                conflicting_booking: earliestConflict,
+                message: `All regulation courts (Court A & Court B) are fully booked for this time window (${conflictStart} to ${conflictEnd}). Please select another time or duration.`
+              });
+            }
+
+            assignedCourt = candidateCourt;
+            unitRate = Number(candidateCourt.hourly_rate || activity.price_per_unit);
+          }
+        }
+      } else {
+        // Non-pickleball activity inventory check with row lock
+        await conn.query('SELECT id FROM activities WHERE id = ? FOR UPDATE', [activity_id]);
+
+        const [activeRentals] = await conn.query(`
+          SELECT ar.id, ar.start_time, ar.end_time, u.full_name AS customer_name
+          FROM activity_rentals ar
+          LEFT JOIN users u ON u.id = ar.customer_id
+          WHERE ar.activity_id = ?
+            AND ar.status NOT IN ('cancelled', 'completed', 'rejected')
+            AND (ar.start_time < ? AND ar.end_time > ?)
+          ORDER BY ar.start_time ASC
+        `, [activity_id, sqlEndTime, sqlStartTime]);
+
+        if (activeRentals.length >= (activity.inventory_count || 1)) {
+          await conn.rollback();
+          const conflict = activeRentals[0];
+          const conflictStart = new Date(conflict.start_time).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
+          const conflictEnd = new Date(conflict.end_time).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
+          return res.status(409).json({
+            conflict: true,
+            conflicting_booking: conflict,
+            message: `The activity is already fully booked from ${conflictStart} to ${conflictEnd}. Please select another start time or duration.`
+          });
         }
       }
-    } else {
-      // Non-pickleball activity inventory check
-      const [activeRentals] = await pool.query(`
-        SELECT ar.id, ar.start_time, ar.end_time, u.full_name AS customer_name
-        FROM activity_rentals ar
-        LEFT JOIN users u ON u.id = ar.customer_id
-        WHERE ar.activity_id = ?
-          AND ar.status NOT IN ('cancelled', 'completed', 'rejected')
-          AND (ar.start_time < ? AND ar.end_time > ?)
-        ORDER BY ar.start_time ASC
-      `, [activity_id, sqlEndTime, sqlStartTime]);
 
-      if (activeRentals.length >= (activity.inventory_count || 1)) {
-        const conflict = activeRentals[0];
-        const conflictStart = new Date(conflict.start_time).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
-        const conflictEnd = new Date(conflict.end_time).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
-        return res.status(409).json({
-          conflict: true,
-          conflicting_booking: conflict,
-          message: `The activity is already fully booked from ${conflictStart} to ${conflictEnd}. Please select another start time or duration.`
+      const durationHours = Math.max(0.5, (new Date(end_time) - new Date(start_time)) / (1000 * 60 * 60));
+      const totalPrice = unitRate * durationHours;
+      const paymentDeadline = requestLifecycle.getPaymentDeadline();
+      let initialStatus = 'pending_payment';
+
+      const [result] = await conn.query(`
+        INSERT INTO activity_rentals (customer_id, activity_id, court_id, start_time, end_time, status, notes, payment_deadline, created_by, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
+      `, [
+        targetCustomerId,
+        activity_id,
+        assignedCourt ? assignedCourt.id : null,
+        sqlStartTime,
+        sqlEndTime,
+        initialStatus,
+        notes || null,
+        paymentDeadline,
+        createdBy
+      ]);
+
+      const newRentalId = result.insertId;
+      const currentYear = new Date().getFullYear();
+      const billNumber = `BILL-ACT-${currentYear}-${String(newRentalId).padStart(4, '0')}`;
+
+      // Create bill
+      const [billRes] = await conn.query(`
+        INSERT INTO bills (bill_number, customer_id, activity_rental_id, total_amount, paid_amount, status, issued_by, issued_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, NOW())
+      `, [
+        billNumber,
+        targetCustomerId,
+        newRentalId,
+        totalPrice,
+        initial_payment ? Number(initial_payment) : 0,
+        initial_payment >= totalPrice ? 'paid' : (initial_payment > 0 ? 'partially_paid' : 'unpaid'),
+        req.user.id || targetCustomerId,
+      ]);
+
+      const billId = billRes.insertId;
+      const lineItemDesc = assignedCourt
+        ? `${activity.name} — ${assignedCourt.name} (${durationHours} hours)`
+        : `${activity.name} (${durationHours} hours)`;
+
+      await conn.query(`
+        INSERT INTO bill_line_items (bill_id, description, quantity, unit_price)
+        VALUES (?, ?, ?, ?)
+      `, [billId, lineItemDesc, durationHours, unitRate]);
+
+      if (initial_payment && Number(initial_payment) > 0) {
+        await conn.query(`
+          INSERT INTO payments (bill_id, amount, method, received_by, paid_at, notes)
+          VALUES (?, ?, ?, ?, NOW(), 'Initial activity payment')
+        `, [billId, Number(initial_payment), payment_method || 'cash', req.user.id]);
+
+        const payTransition = await requestLifecycle.handlePaymentReceived('activity_rental', newRentalId, {
+          userId: req.user.id,
+          userName: req.user.full_name || req.user.username,
+        });
+        if (payTransition.transitioned) initialStatus = payTransition.newStatus;
+      } else {
+        await requestLifecycle.logAudit(conn, {
+          entityType: 'activity_rental',
+          entityId: newRentalId,
+          fromStatus: null,
+          toStatus: 'pending_payment',
+          performedBy: req.user.id,
+          performedByName: req.user.full_name || req.user.username,
+          triggerType: 'manual',
+          reason: assignedCourt
+            ? `Pickleball court reservation requested for ${assignedCourt.name}. Awaiting payment.`
+            : 'Court / activity reservation requested. Awaiting payment.',
+          metadata: { totalPrice, paymentDeadline, court_id: assignedCourt ? assignedCourt.id : null, court_name: assignedCourt ? assignedCourt.name : null },
         });
       }
-    }
 
-    const durationHours = Math.max(0.5, (new Date(end_time) - new Date(start_time)) / (1000 * 60 * 60));
-    const totalPrice = unitRate * durationHours;
-    const paymentDeadline = requestLifecycle.getPaymentDeadline();
-    let initialStatus = 'pending_payment';
+      await conn.commit();
 
-    const [result] = await pool.query(`
-      INSERT INTO activity_rentals (customer_id, activity_id, court_id, start_time, end_time, status, notes, payment_deadline, created_by, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
-    `, [
-      targetCustomerId,
-      activity_id,
-      assignedCourt ? assignedCourt.id : null,
-      sqlStartTime,
-      sqlEndTime,
-      initialStatus,
-      notes || null,
-      paymentDeadline,
-      createdBy
-    ]);
-
-    const newRentalId = result.insertId;
-    const currentYear = new Date().getFullYear();
-    const billNumber = `BILL-ACT-${currentYear}-${String(newRentalId).padStart(4, '0')}`;
-
-    // Create bill
-    const [billRes] = await pool.query(`
-      INSERT INTO bills (bill_number, customer_id, activity_rental_id, total_amount, paid_amount, status, issued_by, issued_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, NOW())
-    `, [
-      billNumber,
-      targetCustomerId,
-      newRentalId,
-      totalPrice,
-      initial_payment ? Number(initial_payment) : 0,
-      initial_payment >= totalPrice ? 'paid' : (initial_payment > 0 ? 'partially_paid' : 'unpaid'),
-      req.user.id || targetCustomerId,
-    ]);
-
-    const billId = billRes.insertId;
-    const lineItemDesc = assignedCourt
-      ? `${activity.name} — ${assignedCourt.name} (${durationHours} hours)`
-      : `${activity.name} (${durationHours} hours)`;
-
-    await pool.query(`
-      INSERT INTO bill_line_items (bill_id, description, quantity, unit_price)
-      VALUES (?, ?, ?, ?)
-    `, [billId, lineItemDesc, durationHours, unitRate]);
-
-    if (initial_payment && Number(initial_payment) > 0) {
-      await pool.query(`
-        INSERT INTO payments (bill_id, amount, method, received_by, paid_at, notes)
-        VALUES (?, ?, ?, ?, NOW(), 'Initial activity payment')
-      `, [billId, Number(initial_payment), payment_method || 'cash', req.user.id]);
-
-      const payTransition = await requestLifecycle.handlePaymentReceived('activity_rental', newRentalId, {
-        userId: req.user.id,
-        userName: req.user.full_name || req.user.username,
+      res.status(201).json({
+        id: newRentalId,
+        activity_name: activity.name,
+        court_id: assignedCourt ? assignedCourt.id : null,
+        court_name: assignedCourt ? assignedCourt.name : null,
+        court_code: assignedCourt ? assignedCourt.court_code : null,
+        total_price: totalPrice,
+        status: initialStatus.toUpperCase(),
+        payment_deadline: paymentDeadline,
+        message: assignedCourt
+          ? `Court reservation created for ${assignedCourt.name}!`
+          : 'Court / activity reservation created.',
       });
-      if (payTransition.transitioned) initialStatus = payTransition.newStatus;
-    } else {
-      await requestLifecycle.logAudit(pool, {
-        entityType: 'activity_rental',
-        entityId: newRentalId,
-        fromStatus: null,
-        toStatus: 'pending_payment',
-        performedBy: req.user.id,
-        performedByName: req.user.full_name || req.user.username,
-        triggerType: 'manual',
-        reason: assignedCourt
-          ? `Pickleball court reservation requested for ${assignedCourt.name}. Awaiting payment.`
-          : 'Court / activity reservation requested. Awaiting payment.',
-        metadata: { totalPrice, paymentDeadline, court_id: assignedCourt ? assignedCourt.id : null, court_name: assignedCourt ? assignedCourt.name : null },
-      });
+    } catch (err) {
+      if (conn) {
+        try { await conn.rollback(); } catch (_) {}
+      }
+      throw err;
+    } finally {
+      if (conn) conn.release();
     }
-
-    res.status(201).json({
-      id: newRentalId,
-      activity_name: activity.name,
-      court_id: assignedCourt ? assignedCourt.id : null,
-      court_name: assignedCourt ? assignedCourt.name : null,
-      court_code: assignedCourt ? assignedCourt.court_code : null,
-      total_price: totalPrice,
-      status: initialStatus.toUpperCase(),
-      payment_deadline: paymentDeadline,
-      message: assignedCourt
-        ? `Court reservation created for ${assignedCourt.name}!`
-        : 'Court / activity reservation created.',
-    });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }

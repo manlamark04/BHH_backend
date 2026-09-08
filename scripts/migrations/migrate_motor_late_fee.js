@@ -1,4 +1,4 @@
-const pool = require('./src/config/db');
+const pool = require('../../src/config/db');
 
 async function migrate() {
   console.log('--- Starting Motor Rent Late Fee Migration ---');

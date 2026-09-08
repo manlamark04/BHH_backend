@@ -17,6 +17,7 @@ const courtRoutes       = require('./routes/courts.routes');
 const auditRoutes       = require('./routes/audit.routes');
 const notificationRoutes = require('./routes/notifications.routes');
 const inquiryRoutes     = require('./routes/inquiries.routes');
+const { errorHandler, notFoundHandler } = require('./middleware/errorHandler');
 
 const app = express();
 
@@ -427,13 +428,8 @@ app.get('/api/health', async (req, res) => {
   });
 });
 
-// ── 404 handler ─────────────────────────────────────────────
-app.use((req, res) => res.status(404).json({ message: 'Route not found.' }));
-
-// ── Global error handler ────────────────────────────────────
-app.use((err, req, res, next) => {
-  console.error(err.stack);
-  res.status(500).json({ message: 'Internal server error.', error: process.env.NODE_ENV === 'development' ? err.message : undefined });
-});
+// ── 404 & Global error handlers ─────────────────────────────
+app.use(notFoundHandler);
+app.use(errorHandler);
 
 module.exports = app;

@@ -1,5 +1,5 @@
-const pool = require('./src/config/db');
-const { generateReceiptCode } = require('./src/utils/receipt.util');
+const pool = require('../../src/config/db');
+const { generateReceiptCode } = require('../../src/utils/receipt.util');
 
 async function migrate() {
   console.log('--- Starting Official Receipt (OR) Number Migration ---');

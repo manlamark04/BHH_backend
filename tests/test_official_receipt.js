@@ -1,5 +1,5 @@
-const pool = require('./src/config/db');
-const { generateReceiptCode, getUniqueReceiptNumber } = require('./src/utils/receipt.util');
+const pool = require('../src/config/db');
+const { generateReceiptCode, getUniqueReceiptNumber } = require('../src/utils/receipt.util');
 
 async function runTests() {
   console.log('=== Running Official Receipt (OR) Number Integration Tests ===\n');
