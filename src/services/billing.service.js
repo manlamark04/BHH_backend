@@ -16,12 +16,71 @@ function formatActivityHours(startVal, endVal) {
   }
 }
 
+let licenseColumnsChecked = false;
+async function ensureLicenseColumns() {
+  if (licenseColumnsChecked) return;
+  try {
+    const checkAndAdd = async (table, col, def) => {
+      try {
+        const [rows] = await pool.query(
+          `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?`,
+          [table, col]
+        );
+        if (rows.length === 0) {
+          await pool.query(`ALTER TABLE \`${table}\` ADD COLUMN \`${col}\` ${def}`);
+        }
+      } catch (_) {}
+    };
+
+    await checkAndAdd('motor_rentals', 'license_type', "VARCHAR(20) NOT NULL DEFAULT 'PH'");
+    await checkAndAdd('motor_rentals', 'passport_number', 'VARCHAR(100) NULL');
+    await checkAndAdd('motor_rentals', 'country_of_issuance', 'VARCHAR(100) NULL');
+    await checkAndAdd('motor_rentals', 'foreign_license_number', 'VARCHAR(100) NULL');
+    await checkAndAdd('motor_rentals', 'foreign_license_expiry', 'VARCHAR(50) NULL');
+    await checkAndAdd('motor_rentals', 'idp_number', 'VARCHAR(100) NULL');
+    await checkAndAdd('motor_rentals', 'idp_expiry', 'VARCHAR(50) NULL');
+    await checkAndAdd('motor_rentals', 'idp_category_a', 'TINYINT(1) NOT NULL DEFAULT 0');
+    await checkAndAdd('motor_rentals', 'driver_license_number', 'VARCHAR(100) NULL');
+    await checkAndAdd('motor_rentals', 'driver_license_expiry', 'VARCHAR(50) NULL');
+    await checkAndAdd('motor_rentals', 'driver_license_restrictions', 'VARCHAR(100) NULL');
+    await checkAndAdd('motor_rentals', 'designated_driver_name', 'VARCHAR(150) NULL');
+    await checkAndAdd('motor_rentals', 'license_verified_by', 'INT NULL');
+    await checkAndAdd('motor_rentals', 'license_verified_staff_name', 'VARCHAR(150) NULL');
+    await checkAndAdd('motor_rentals', 'license_verified_at', 'DATETIME NULL');
+    await checkAndAdd('motor_rentals', 'license_verification_status', "VARCHAR(50) NOT NULL DEFAULT 'UNVERIFIED'");
+    await checkAndAdd('motor_rentals', 'license_flag_reason', 'TEXT NULL');
+
+    await checkAndAdd('bills', 'license_type', "VARCHAR(20) NOT NULL DEFAULT 'PH'");
+    await checkAndAdd('bills', 'passport_number', 'VARCHAR(100) NULL');
+    await checkAndAdd('bills', 'country_of_issuance', 'VARCHAR(100) NULL');
+    await checkAndAdd('bills', 'foreign_license_number', 'VARCHAR(100) NULL');
+    await checkAndAdd('bills', 'foreign_license_expiry', 'VARCHAR(50) NULL');
+    await checkAndAdd('bills', 'idp_number', 'VARCHAR(100) NULL');
+    await checkAndAdd('bills', 'idp_expiry', 'VARCHAR(50) NULL');
+    await checkAndAdd('bills', 'idp_category_a', 'TINYINT(1) NOT NULL DEFAULT 0');
+    await checkAndAdd('bills', 'driver_license_number', 'VARCHAR(100) NULL');
+    await checkAndAdd('bills', 'driver_license_expiry', 'VARCHAR(50) NULL');
+    await checkAndAdd('bills', 'driver_license_restrictions', 'VARCHAR(100) NULL');
+    await checkAndAdd('bills', 'designated_driver_name', 'VARCHAR(150) NULL');
+    await checkAndAdd('bills', 'license_verified_by', 'INT NULL');
+    await checkAndAdd('bills', 'license_verified_staff_name', 'VARCHAR(150) NULL');
+    await checkAndAdd('bills', 'license_verified_at', 'DATETIME NULL');
+    await checkAndAdd('bills', 'license_verification_status', "VARCHAR(50) NOT NULL DEFAULT 'UNVERIFIED'");
+    await checkAndAdd('bills', 'license_flag_reason', 'TEXT NULL');
+
+    licenseColumnsChecked = true;
+  } catch (err) {
+    console.warn('ensureLicenseColumns warning:', err.message);
+  }
+}
+
 /**
  * GET /api/bills — Staff/Admin
  * Returns all bills / invoices enriched with guest details, room info, and transaction breakdown.
  */
 async function getAllBills(req, res) {
   try {
+    await ensureLicenseColumns();
     const { status, search } = req.query;
 
     const [bills] = await pool.query(`
@@ -38,7 +97,23 @@ async function getAllBills(req, res) {
         b.cancellation_fee,
         b.receipt_number,
         b.issued_by,
-        b.issued_at,
+        b.license_type AS bill_license_type,
+        b.passport_number AS bill_passport_number,
+        b.country_of_issuance AS bill_country_of_issuance,
+        b.foreign_license_number AS bill_foreign_license_number,
+        b.foreign_license_expiry AS bill_foreign_license_expiry,
+        b.idp_number AS bill_idp_number,
+        b.idp_expiry AS bill_idp_expiry,
+        b.idp_category_a AS bill_idp_category_a,
+        b.driver_license_number AS bill_driver_license_number,
+        b.driver_license_expiry AS bill_driver_license_expiry,
+        b.driver_license_restrictions AS bill_driver_license_restrictions,
+        b.designated_driver_name AS bill_designated_driver_name,
+        b.license_verified_by AS bill_license_verified_by,
+        b.license_verified_staff_name AS bill_license_verified_staff_name,
+        b.license_verified_at AS bill_license_verified_at,
+        b.license_verification_status AS bill_license_verification_status,
+        b.license_flag_reason AS bill_license_flag_reason,
         u.full_name AS customer_name,
         u.username AS customer_username,
         u.unique_id AS customer_code,
@@ -63,6 +138,23 @@ async function getAllBills(req, res) {
         ar.end_time AS activity_end_time,
         mr.status AS motor_status,
         mr.rental_id AS motor_rental_code,
+        mr.license_type AS motor_license_type,
+        mr.passport_number AS motor_passport_number,
+        mr.country_of_issuance AS motor_country_of_issuance,
+        mr.foreign_license_number AS motor_foreign_license_number,
+        mr.foreign_license_expiry AS motor_foreign_license_expiry,
+        mr.idp_number AS motor_idp_number,
+        mr.idp_expiry AS motor_idp_expiry,
+        mr.idp_category_a AS motor_idp_category_a,
+        mr.driver_license_number AS motor_license_number,
+        mr.driver_license_expiry AS motor_license_expiry,
+        mr.driver_license_restrictions AS motor_license_restrictions,
+        mr.designated_driver_name AS motor_designated_driver_name,
+        mr.license_verified_by AS motor_license_verified_by,
+        mr.license_verified_staff_name AS motor_license_verified_staff_name,
+        mr.license_verified_at AS motor_license_verified_at,
+        mr.license_verification_status AS motor_license_verification_status,
+        mr.license_flag_reason AS motor_license_flag_reason,
         bli.line_items_summary
       FROM bills b
       LEFT JOIN users u ON u.id = b.customer_id
@@ -126,10 +218,11 @@ async function getAllBills(req, res) {
       const isNoShow = String(b.booking_status || '').toLowerCase() === 'no_show' || String(b.status || '').toLowerCase() === 'no_show' || Number(b.booking_no_show_fee || 0) > 0 || Number(b.no_show_fee || 0) > 0;
       const noShowFee = Number(b.booking_no_show_fee ?? b.no_show_fee ?? b.cancellation_fee ?? 0);
 
-      // Pending Approval check: linked reservation is still awaiting staff approval (Rooms only)
+      // Pending Approval check: linked reservation is still awaiting staff approval (Rooms, Activities, Motorcycles)
       const isBookingPendingApproval = Boolean(b.booking_id && ['pending_approval', 'pending', 'requested'].includes(String(b.booking_status || '').toLowerCase()));
       const isActivityPendingApproval = Boolean(b.activity_rental_id && ['pending_approval', 'pending', 'requested'].includes(String(b.activity_status || '').toLowerCase()));
-      const isPendingApproval = !isCancelled && !isNoShow && (isBookingPendingApproval || isActivityPendingApproval);
+      const isMotorPendingApproval = Boolean(b.motor_rental_id && ['pending_approval', 'pending', 'requested'].includes(String(b.motor_status || '').toLowerCase()));
+      const isPendingApproval = !isCancelled && !isNoShow && (isBookingPendingApproval || isActivityPendingApproval || isMotorPendingApproval);
 
       const cancellationFee = Number(b.cancellation_fee ?? b.booking_cancellation_fee ?? 0);
       let remainingBalance = 0;
@@ -224,6 +317,44 @@ async function getAllBills(req, res) {
         serviceName = b.line_items_summary;
       }
 
+      // Parse Driver's License Info for Motor Rentals
+      let driverLicenseNumber = b.motor_license_number || b.bill_driver_license_number || null;
+      let driverLicenseExpiry = b.motor_license_expiry || b.bill_driver_license_expiry || null;
+      if (!driverLicenseNumber && b.motor_notes) {
+        const match = b.motor_notes.match(/\[Driver's License:\s*([^|]+)\s*\|\s*Expiry:\s*([^\]]+)\]/i);
+        if (match) {
+          driverLicenseNumber = match[1].trim();
+          driverLicenseExpiry = match[2].trim();
+        }
+      }
+
+      let driverLicenseRestrictions = b.motor_license_restrictions || b.bill_driver_license_restrictions || null;
+      let designatedDriverName = b.motor_designated_driver_name || b.bill_designated_driver_name || null;
+      if (!driverLicenseRestrictions && b.motor_notes) {
+        const restMatch = b.motor_notes.match(/Restrictions?:\s*([^|\n\]]+)/i);
+        if (restMatch) driverLicenseRestrictions = restMatch[1].trim();
+      }
+      if (!designatedDriverName && b.motor_notes) {
+        const driverMatch = b.motor_notes.match(/Driver:\s*([^|\n\]]+)/i);
+        if (driverMatch) designatedDriverName = driverMatch[1].trim();
+      }
+
+      const licenseVerificationStatus = b.bill_license_verification_status && b.bill_license_verification_status !== 'UNVERIFIED'
+        ? b.bill_license_verification_status
+        : (b.motor_license_verification_status || 'UNVERIFIED');
+      const licenseVerifiedStaffName = b.bill_license_verified_staff_name || b.motor_license_verified_staff_name || null;
+      const licenseVerifiedAt = b.bill_license_verified_at || b.motor_license_verified_at || null;
+      const licenseFlagReason = b.bill_license_flag_reason || b.motor_license_flag_reason || null;
+
+      const licenseType = b.bill_license_type || b.motor_license_type || 'PH';
+      const passportNumber = b.bill_passport_number || b.motor_passport_number || null;
+      const countryOfIssuance = b.bill_country_of_issuance || b.motor_country_of_issuance || null;
+      const foreignLicenseNumber = b.bill_foreign_license_number || b.motor_foreign_license_number || null;
+      const foreignLicenseExpiry = b.bill_foreign_license_expiry || b.motor_foreign_license_expiry || null;
+      const idpNumber = b.bill_idp_number || b.motor_idp_number || null;
+      const idpExpiry = b.bill_idp_expiry || b.motor_idp_expiry || null;
+      const idpCategoryA = Boolean(b.bill_idp_category_a || b.motor_idp_category_a);
+
       return {
         id: b.id,
         invoice_number: invoiceNumber,
@@ -266,6 +397,24 @@ async function getAllBills(req, res) {
         issued_at: b.issued_at,
         receipt_number: validPayments.length > 0 ? (validPayments[0].receipt_number || '—') : (b.receipt_number || '—'),
         payments: billPayments,
+        license_type: licenseType,
+        passport_number: passportNumber,
+        country_of_issuance: countryOfIssuance,
+        foreign_license_number: foreignLicenseNumber,
+        foreign_license_expiry: foreignLicenseExpiry,
+        idp_number: idpNumber,
+        idp_expiry: idpExpiry,
+        idp_category_a: idpCategoryA,
+        driver_license_number: driverLicenseNumber,
+        driver_license_expiry: driverLicenseExpiry,
+        driver_license_restrictions: driverLicenseRestrictions,
+        designated_driver_name: designatedDriverName,
+        license_verification_status: licenseVerificationStatus,
+        license_verified_staff_name: licenseVerifiedStaffName,
+        license_verified_at: licenseVerifiedAt,
+        license_flag_reason: licenseFlagReason,
+        motor_rental_id: b.motor_rental_id,
+        motor_rental_code: b.motor_rental_code,
       };
     });
 
@@ -297,6 +446,7 @@ async function getAllBills(req, res) {
 /** GET /api/bills/my — Customer: own bills (transaction history) */
 async function getMyBills(req, res) {
   try {
+    await ensureLicenseColumns();
     const customerId = req.user.id;
     const [bills] = await pool.query(`
       SELECT 
@@ -312,6 +462,23 @@ async function getMyBills(req, res) {
         b.receipt_number,
         b.status,
         b.issued_at,
+        b.license_type AS bill_license_type,
+        b.passport_number AS bill_passport_number,
+        b.country_of_issuance AS bill_country_of_issuance,
+        b.foreign_license_number AS bill_foreign_license_number,
+        b.foreign_license_expiry AS bill_foreign_license_expiry,
+        b.idp_number AS bill_idp_number,
+        b.idp_expiry AS bill_idp_expiry,
+        b.idp_category_a AS bill_idp_category_a,
+        b.driver_license_number AS bill_driver_license_number,
+        b.driver_license_expiry AS bill_driver_license_expiry,
+        b.driver_license_restrictions AS bill_driver_license_restrictions,
+        b.designated_driver_name AS bill_designated_driver_name,
+        b.license_verified_by AS bill_license_verified_by,
+        b.license_verified_staff_name AS bill_license_verified_staff_name,
+        b.license_verified_at AS bill_license_verified_at,
+        b.license_verification_status AS bill_license_verification_status,
+        b.license_flag_reason AS bill_license_flag_reason,
         u.full_name AS customer_name,
         u.unique_id AS customer_code,
         u.email AS customer_email,
@@ -330,6 +497,24 @@ async function getMyBills(req, res) {
         ar.start_time AS activity_start_time,
         ar.end_time AS activity_end_time,
         mr.status AS motor_status,
+        mr.rental_id AS motor_rental_code,
+        mr.license_type AS motor_license_type,
+        mr.passport_number AS motor_passport_number,
+        mr.country_of_issuance AS motor_country_of_issuance,
+        mr.foreign_license_number AS motor_foreign_license_number,
+        mr.foreign_license_expiry AS motor_foreign_license_expiry,
+        mr.idp_number AS motor_idp_number,
+        mr.idp_expiry AS motor_idp_expiry,
+        mr.idp_category_a AS motor_idp_category_a,
+        mr.driver_license_number AS motor_license_number,
+        mr.driver_license_expiry AS motor_license_expiry,
+        mr.driver_license_restrictions AS motor_license_restrictions,
+        mr.designated_driver_name AS motor_designated_driver_name,
+        mr.license_verified_by AS motor_license_verified_by,
+        mr.license_verified_staff_name AS motor_license_verified_staff_name,
+        mr.license_verified_at AS motor_license_verified_at,
+        mr.license_verification_status AS motor_license_verification_status,
+        mr.license_flag_reason AS motor_license_flag_reason,
         items.line_items_summary
       FROM bills b
       LEFT JOIN users u ON u.id = b.customer_id
@@ -337,7 +522,7 @@ async function getMyBills(req, res) {
       LEFT JOIN rooms r ON r.id = bk.room_id
       LEFT JOIN activity_rentals ar ON ar.id = b.activity_rental_id
       LEFT JOIN activities a ON a.id = ar.activity_id
-      LEFT JOIN motor_rentals mr ON mr.id = b.motor_rental_id
+      LEFT JOIN motor_rentals mr ON mr.id = b.motor_rental_id OR (b.motor_rental_id IS NULL AND b.bill_number LIKE CONCAT('BILL-', mr.rental_id))
       LEFT JOIN (
         SELECT bill_id, GROUP_CONCAT(CONCAT(description, ' (x', quantity, ')') SEPARATOR ', ') AS line_items_summary
         FROM bill_line_items
@@ -385,7 +570,12 @@ async function getMyBills(req, res) {
       const isCancelledBill = ['cancelled', 'void'].includes(String(b.status || '').toLowerCase());
       const isCancelled = isCancelledBooking || isCancelledActivity || isCancelledMotor || isCancelledBill;
 
-      const isNoShow = String(b.booking_status || '').toLowerCase() === 'no_show' || String(b.status || '').toLowerCase() === 'no_show' || Number(b.booking_no_show_fee || 0) > 0 || Number(b.no_show_fee || 0) > 0;
+      // Pending Approval check: linked reservation is still awaiting staff approval
+      const isBookingPendingApproval = Boolean(b.booking_id && ['pending_approval', 'pending', 'requested'].includes(String(b.booking_status || '').toLowerCase()));
+      const isActivityPendingApproval = Boolean(b.activity_rental_id && ['pending_approval', 'pending', 'requested'].includes(String(b.activity_status || '').toLowerCase()));
+      const isMotorPendingApproval = Boolean(b.motor_rental_id && ['pending_approval', 'pending', 'requested'].includes(String(b.motor_status || '').toLowerCase()));
+      const isPendingApproval = !isCancelled && !isNoShow && (isBookingPendingApproval || isActivityPendingApproval || isMotorPendingApproval);
+
       const noShowFee = Number(b.booking_no_show_fee ?? b.no_show_fee ?? b.cancellation_fee ?? 0);
       const cancellationFee = Number(b.cancellation_fee ?? b.booking_cancellation_fee ?? 0);
       let remainingBalance = 0;
@@ -428,6 +618,9 @@ async function getMyBills(req, res) {
       } else if (billPayments.some((p) => p.is_refunded) && computedPaid === 0) {
         status = 'REFUNDED';
         remainingBalance = 0;
+      } else if (isPendingApproval) {
+        status = 'PENDING_APPROVAL';
+        remainingBalance = Math.max(0, totalAmount - computedPaid);
       } else {
         status = 'UNPAID';
         remainingBalance = Math.max(0, totalAmount - computedPaid);
@@ -472,6 +665,44 @@ async function getMyBills(req, res) {
         serviceDetails = 'Service Availment';
       }
 
+      // Parse Driver's License Info for Motor Rentals
+      let driverLicenseNumber = b.motor_license_number || b.bill_driver_license_number || null;
+      let driverLicenseExpiry = b.motor_license_expiry || b.bill_driver_license_expiry || null;
+      if (!driverLicenseNumber && b.motor_notes) {
+        const match = b.motor_notes.match(/\[Driver's License:\s*([^|]+)\s*\|\s*Expiry:\s*([^\]]+)\]/i);
+        if (match) {
+          driverLicenseNumber = match[1].trim();
+          driverLicenseExpiry = match[2].trim();
+        }
+      }
+
+      let driverLicenseRestrictions = b.motor_license_restrictions || b.bill_driver_license_restrictions || null;
+      let designatedDriverName = b.motor_designated_driver_name || b.bill_designated_driver_name || null;
+      if (!driverLicenseRestrictions && b.motor_notes) {
+        const restMatch = b.motor_notes.match(/Restrictions?:\s*([^|\n\]]+)/i);
+        if (restMatch) driverLicenseRestrictions = restMatch[1].trim();
+      }
+      if (!designatedDriverName && b.motor_notes) {
+        const driverMatch = b.motor_notes.match(/Driver:\s*([^|\n\]]+)/i);
+        if (driverMatch) designatedDriverName = driverMatch[1].trim();
+      }
+
+      const licenseVerificationStatus = b.bill_license_verification_status && b.bill_license_verification_status !== 'UNVERIFIED'
+        ? b.bill_license_verification_status
+        : (b.motor_license_verification_status || 'UNVERIFIED');
+      const licenseVerifiedStaffName = b.bill_license_verified_staff_name || b.motor_license_verified_staff_name || null;
+      const licenseVerifiedAt = b.bill_license_verified_at || b.motor_license_verified_at || null;
+      const licenseFlagReason = b.bill_license_flag_reason || b.motor_license_flag_reason || null;
+
+      const licenseType = b.bill_license_type || b.motor_license_type || 'PH';
+      const passportNumber = b.bill_passport_number || b.motor_passport_number || null;
+      const countryOfIssuance = b.bill_country_of_issuance || b.motor_country_of_issuance || null;
+      const foreignLicenseNumber = b.bill_foreign_license_number || b.motor_foreign_license_number || null;
+      const foreignLicenseExpiry = b.bill_foreign_license_expiry || b.motor_foreign_license_expiry || null;
+      const idpNumber = b.bill_idp_number || b.motor_idp_number || null;
+      const idpExpiry = b.bill_idp_expiry || b.motor_idp_expiry || null;
+      const idpCategoryA = Boolean(b.bill_idp_category_a || b.motor_idp_category_a);
+
       return {
         id: b.id,
         invoice_number: invoiceNumber,
@@ -494,6 +725,7 @@ async function getMyBills(req, res) {
         amount_paid: computedPaid,
         remaining_balance: remainingBalance,
         balance: remainingBalance,
+        is_pending_approval: isPendingApproval,
         status: status,
         payment_status: status,
         method: method,
@@ -501,6 +733,24 @@ async function getMyBills(req, res) {
         issued_at: b.issued_at,
         created_at: b.issued_at,
         payments: billPayments,
+        license_type: licenseType,
+        passport_number: passportNumber,
+        country_of_issuance: countryOfIssuance,
+        foreign_license_number: foreignLicenseNumber,
+        foreign_license_expiry: foreignLicenseExpiry,
+        idp_number: idpNumber,
+        idp_expiry: idpExpiry,
+        idp_category_a: idpCategoryA,
+        driver_license_number: driverLicenseNumber,
+        driver_license_expiry: driverLicenseExpiry,
+        driver_license_restrictions: driverLicenseRestrictions,
+        designated_driver_name: designatedDriverName,
+        license_verification_status: licenseVerificationStatus,
+        license_verified_staff_name: licenseVerifiedStaffName,
+        license_verified_at: licenseVerifiedAt,
+        license_flag_reason: licenseFlagReason,
+        motor_rental_id: b.motor_rental_id,
+        motor_rental_code: b.motor_rental_code,
       };
     });
 
@@ -613,12 +863,45 @@ async function recordPayment(req, res) {
     if (bRows.length === 0) return res.status(404).json({ message: 'Bill not found.' });
     const bill = bRows[0];
 
-    // Enforce "approve first, then bill": block payment if room reservation is still in pending approval
+    // Enforce "approve first, then bill": block payment if room or motorcycle reservation is still in pending approval
     if (bill.booking_id) {
       const [bkgRows] = await pool.query('SELECT status FROM bookings WHERE id = ?', [bill.booking_id]);
       if (bkgRows.length > 0 && ['pending_approval', 'pending', 'requested'].includes(String(bkgRows[0].status || '').toLowerCase())) {
         return res.status(400).json({
           message: 'Cannot collect payment for a room reservation that is still pending approval. Please approve the reservation in Pending Approvals first.'
+        });
+      }
+    }
+    if (bill.motor_rental_id) {
+      const [mrRows] = await pool.query('SELECT status FROM motor_rentals WHERE id = ?', [bill.motor_rental_id]);
+      if (mrRows.length > 0 && ['pending_approval', 'pending', 'requested'].includes(String(mrRows[0].status || '').toLowerCase())) {
+        return res.status(400).json({
+          message: 'Cannot collect payment for a motorcycle rental that is still pending approval. Please approve the reservation first.'
+        });
+      }
+    }
+
+    // Hard requirement: Motor Rental invoices must have driver's license verified in-person before collecting payment
+    const isMotorBill = Boolean(
+      bill.motor_rental_id ||
+      (bill.bill_number && bill.bill_number.startsWith('BILL-MTR'))
+    );
+    if (isMotorBill) {
+      await ensureLicenseColumns();
+      const [licCheck] = await pool.query(`
+        SELECT b.license_verification_status AS bill_status, mr.license_verification_status AS motor_status
+        FROM bills b
+        LEFT JOIN motor_rentals mr ON mr.id = b.motor_rental_id OR (b.motor_rental_id IS NULL AND b.bill_number LIKE CONCAT('BILL-', mr.rental_id))
+        WHERE b.id = ?
+      `, [targetBillId]);
+
+      const isVerified = licCheck.length > 0 && (
+        licCheck[0].bill_status === 'VERIFIED' || licCheck[0].motor_status === 'VERIFIED'
+      );
+
+      if (!isVerified) {
+        return res.status(400).json({
+          message: "Physical driver's license verification is required before collecting payment for this motor rental. Please cross-check the guest's physical ID and mark it as verified."
         });
       }
     }
@@ -910,7 +1193,178 @@ async function cancelBill(req, res) {
   }
 }
 
+/**
+ * POST /api/bills/:id/verify-license
+ * Staff physically cross-checks and marks guest's driver license as verified.
+ */
+async function verifyDriverLicense(req, res) {
+  try {
+    await ensureLicenseColumns();
+    const billId = parseInt(req.params.id);
+    const [bills] = await pool.query(`
+      SELECT b.*, mr.id AS linked_motor_rental_id, mr.rental_id AS motor_rental_code, u.full_name AS customer_name
+      FROM bills b
+      LEFT JOIN motor_rentals mr ON mr.id = b.motor_rental_id OR (b.motor_rental_id IS NULL AND b.bill_number LIKE CONCAT('BILL-', mr.rental_id))
+      LEFT JOIN users u ON u.id = b.customer_id
+      WHERE b.id = ?
+    `, [billId]);
+
+    if (bills.length === 0) {
+      return res.status(404).json({ error: 'Invoice not found' });
+    }
+
+    const bill = bills[0];
+    const staffName = req.user.full_name || req.user.username || 'Front Desk Staff';
+    const staffId = req.user.id;
+
+    // Update bill record
+    await pool.query(`
+      UPDATE bills
+      SET license_verification_status = 'VERIFIED',
+          license_verified_by = ?,
+          license_verified_staff_name = ?,
+          license_verified_at = NOW(),
+          license_flag_reason = NULL
+      WHERE id = ?
+    `, [staffId, staffName, billId]);
+
+    // Update linked motor rental if exists
+    const motorId = bill.motor_rental_id || bill.linked_motor_rental_id;
+    if (motorId) {
+      await pool.query(`
+        UPDATE motor_rentals
+        SET license_verification_status = 'VERIFIED',
+            license_verified_by = ?,
+            license_verified_staff_name = ?,
+            license_verified_at = NOW(),
+            license_flag_reason = NULL
+        WHERE id = ?
+      `, [staffId, staffName, motorId]);
+    }
+
+    // Log to unified audit log
+    try {
+      const auditService = require('./audit.service');
+      await auditService.logAction({
+        userId: staffId,
+        userName: staffName,
+        userRole: req.user.role || 'staff',
+        action: 'VERIFY_DRIVER_LICENSE',
+        module: 'BILLING',
+        description: `Staff ${staffName} physically verified driver's license for guest ${bill.customer_name || 'Renter'} on Invoice ${bill.bill_number || `INV-${bill.id}`}.`,
+        entityType: 'bill',
+        entityId: bill.id,
+        ipAddress: req.ip,
+      });
+    } catch (auditErr) {
+      console.warn('Failed to log verification to audit log:', auditErr.message);
+    }
+
+    res.json({
+      success: true,
+      message: 'Driver license marked as verified',
+      verification: {
+        status: 'VERIFIED',
+        staff_name: staffName,
+        verified_at: new Date().toISOString(),
+      },
+    });
+  } catch (err) {
+    console.error('verifyDriverLicense error:', err);
+    res.status(500).json({ error: err.message || 'Failed to verify driver license' });
+  }
+}
+
+/**
+ * POST /api/bills/:id/flag-license
+ * Staff flags a problem or discrepancy with the driver license presented.
+ */
+async function flagDriverLicense(req, res) {
+  try {
+    await ensureLicenseColumns();
+    const billId = parseInt(req.params.id);
+    const { reason } = req.body;
+    if (!reason || !reason.trim()) {
+      return res.status(400).json({ error: 'A reason for flagging the license issue is required.' });
+    }
+
+    const [bills] = await pool.query(`
+      SELECT b.*, mr.id AS linked_motor_rental_id, mr.rental_id AS motor_rental_code, u.full_name AS customer_name
+      FROM bills b
+      LEFT JOIN motor_rentals mr ON mr.id = b.motor_rental_id OR (b.motor_rental_id IS NULL AND b.bill_number LIKE CONCAT('BILL-', mr.rental_id))
+      LEFT JOIN users u ON u.id = b.customer_id
+      WHERE b.id = ?
+    `, [billId]);
+
+    if (bills.length === 0) {
+      return res.status(404).json({ error: 'Invoice not found' });
+    }
+
+    const bill = bills[0];
+    const staffName = req.user.full_name || req.user.username || 'Front Desk Staff';
+    const staffId = req.user.id;
+
+    // Update bill
+    await pool.query(`
+      UPDATE bills
+      SET license_verification_status = 'FLAGGED',
+          license_verified_by = ?,
+          license_verified_staff_name = ?,
+          license_verified_at = NOW(),
+          license_flag_reason = ?
+      WHERE id = ?
+    `, [staffId, staffName, reason.trim(), billId]);
+
+    // Update linked motor rental if exists
+    const motorId = bill.motor_rental_id || bill.linked_motor_rental_id;
+    if (motorId) {
+      await pool.query(`
+        UPDATE motor_rentals
+        SET license_verification_status = 'FLAGGED',
+            license_verified_by = ?,
+            license_verified_staff_name = ?,
+            license_verified_at = NOW(),
+            license_flag_reason = ?
+        WHERE id = ?
+      `, [staffId, staffName, reason.trim(), motorId]);
+    }
+
+    // Log to unified audit log
+    try {
+      const auditService = require('./audit.service');
+      await auditService.logAction({
+        userId: staffId,
+        userName: staffName,
+        userRole: req.user.role || 'staff',
+        action: 'FLAG_DRIVER_LICENSE',
+        module: 'BILLING',
+        description: `Staff ${staffName} flagged a driver's license issue for guest ${bill.customer_name || 'Renter'} on Invoice ${bill.bill_number || `INV-${bill.id}`}: "${reason.trim()}"`,
+        entityType: 'bill',
+        entityId: bill.id,
+        ipAddress: req.ip,
+      });
+    } catch (auditErr) {
+      console.warn('Failed to log license flag to audit log:', auditErr.message);
+    }
+
+    res.json({
+      success: true,
+      message: 'Driver license issue flagged',
+      verification: {
+        status: 'FLAGGED',
+        staff_name: staffName,
+        verified_at: new Date().toISOString(),
+        reason: reason.trim(),
+      },
+    });
+  } catch (err) {
+    console.error('flagDriverLicense error:', err);
+    res.status(500).json({ error: err.message || 'Failed to flag license issue' });
+  }
+}
+
 module.exports = {
+  ensureLicenseColumns,
   getAllBills,
   getMyBills,
   getBillLineItems,
@@ -919,4 +1373,6 @@ module.exports = {
   recordPayment,
   refundPayment,
   cancelBill,
+  verifyDriverLicense,
+  flagDriverLicense,
 };

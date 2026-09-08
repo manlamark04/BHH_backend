@@ -60,4 +60,16 @@ router.post('/:id/cancel',
   svc.cancelBill
 );
 
+// POST /api/bills/:id/verify-license — Staff/Admin: mark driver's license as verified
+router.post('/:id/verify-license',
+  authenticate, requireRole('staff', 'admin'),
+  svc.verifyDriverLicense
+);
+
+// POST /api/bills/:id/flag-license — Staff/Admin: flag discrepancy or mismatch in driver's license
+router.post('/:id/flag-license',
+  authenticate, requireRole('staff', 'admin'),
+  svc.flagDriverLicense
+);
+
 module.exports = router;

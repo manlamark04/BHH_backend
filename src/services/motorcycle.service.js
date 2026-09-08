@@ -344,12 +344,28 @@ async function updateMotorcycleStatus(req, res) {
 async function createMotorRental(req, res) {
   const conn = await pool.getConnection();
   try {
+    const { ensureLicenseColumns } = require('./billing.service');
+    await ensureLicenseColumns();
+
     const {
       customer_id,
       motor_id,
       start_datetime,
       expected_return_datetime,
       notes,
+      license_type,
+      passport_number,
+      country_of_issuance,
+      foreign_license_number,
+      foreign_license_expiry,
+      idp_number,
+      idp_expiry,
+      idp_category_a,
+      driver_license_number,
+      driver_license_expiry,
+      driver_license_restrictions,
+      restriction_codes,
+      designated_driver_name,
     } = req.body;
 
     // Determine customer ID (Staff/Admin can specify customer_id; Customer rents for self)
@@ -377,6 +393,137 @@ async function createMotorRental(req, res) {
     if (returnDate <= startDate) {
       return res.status(400).json({ message: 'Expected return date/time must be after the rental start date/time.' });
     }
+
+    // --- Driver's License & Restriction / IDP Validation ---
+    const selectedLicenseType = (license_type && String(license_type).toUpperCase() === 'FOREIGN') ? 'FOREIGN' : 'PH';
+    let finalLicenseNum = null;
+    let finalLicenseExp = null;
+    let finalRestrictionsStr = null;
+    let finalDesignatedDriver = designated_driver_name ? String(designated_driver_name).trim() : null;
+    let finalPassportNum = null;
+    let finalCountryOfIssuance = null;
+    let finalForeignLicenseNum = null;
+    let finalForeignLicenseExp = null;
+    let finalIdpNum = null;
+    let finalIdpExp = null;
+    let finalIdpCatA = 0;
+    let licenseBadge = '';
+
+    if (selectedLicenseType === 'FOREIGN') {
+      finalPassportNum = passport_number ? String(passport_number).trim() : '';
+      finalCountryOfIssuance = country_of_issuance ? String(country_of_issuance).trim() : '';
+      finalForeignLicenseNum = foreign_license_number ? String(foreign_license_number).trim() : '';
+      finalForeignLicenseExp = foreign_license_expiry ? String(foreign_license_expiry).trim() : '';
+      finalIdpNum = idp_number ? String(idp_number).trim() : '';
+      finalIdpExp = idp_expiry ? String(idp_expiry).trim() : '';
+      finalIdpCatA = (idp_category_a === true || idp_category_a === 1 || idp_category_a === 'true' || idp_category_a === '1') ? 1 : 0;
+
+      if (!finalPassportNum || !finalCountryOfIssuance || !finalForeignLicenseNum || !finalForeignLicenseExp || !finalIdpNum || !finalIdpExp) {
+        return res.status(400).json({
+          message: 'Passport Number, Country of Issuance, Foreign License Number, License Expiry, IDP Number, and IDP Expiry are all required for foreign guests.',
+        });
+      }
+
+      // Check IDP Category A confirmation
+      if (!finalIdpCatA) {
+        return res.status(400).json({
+          message: "An International Driving Permit (IDP) with a motorcycle category is required for foreign guests to rent a motorcycle in the Philippines. Please present your IDP at the front desk, or contact us if you don't have one.",
+        });
+      }
+
+      // Validate foreign license expiration
+      const fExp = new Date(finalForeignLicenseExp);
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      if (!isNaN(fExp.getTime()) && fExp < today) {
+        return res.status(400).json({
+          message: "The provided foreign driver's license has expired. A valid, non-expired license is required.",
+        });
+      }
+
+      // Validate IDP expiration
+      const idpExpDate = new Date(finalIdpExp);
+      if (!isNaN(idpExpDate.getTime()) && idpExpDate < today) {
+        return res.status(400).json({
+          message: "The provided International Driving Permit (IDP) has expired. A valid, non-expired permit is required.",
+        });
+      }
+
+      finalLicenseNum = finalForeignLicenseNum || finalIdpNum;
+      finalLicenseExp = finalIdpExp || finalForeignLicenseExp;
+      finalRestrictionsStr = 'IDP Category A (Motorcycle)';
+      licenseBadge = `[Foreign License (IDP) | Country: ${finalCountryOfIssuance} | Passport: ${finalPassportNum} | Foreign Lic: ${finalForeignLicenseNum} (Exp: ${finalForeignLicenseExp}) | IDP: ${finalIdpNum} (Exp: ${finalIdpExp}) | Category A: Verified]`;
+    } else {
+      // Philippine Driver's License validation
+      let rawLicenseNum = driver_license_number || '';
+      let rawLicenseExpiry = driver_license_expiry || '';
+      let rawRestrictions = driver_license_restrictions || restriction_codes || [];
+
+      // Fallback parsing if embedded in notes
+      if (!rawLicenseNum && notes) {
+        const lm = notes.match(/\[Driver's License:\s*([^|]+)\s*\|\s*Expiry:\s*([^|\]]+)/i);
+        if (lm) {
+          rawLicenseNum = lm[1].trim();
+          rawLicenseExpiry = lm[2].trim();
+        }
+      }
+      if ((!rawRestrictions || (Array.isArray(rawRestrictions) && rawRestrictions.length === 0)) && notes) {
+        const rm = notes.match(/Restrictions?:\s*([^|\]\n]+)/i);
+        if (rm) rawRestrictions = rm[1].trim();
+      }
+      if (!finalDesignatedDriver && notes) {
+        const dm = notes.match(/(?:Designated\s*Driver|Driver):\s*([^|\]\n]+)/i);
+        if (dm) finalDesignatedDriver = dm[1].trim();
+      }
+
+      // Convert restrictions to array
+      let restrictionsList = [];
+      if (Array.isArray(rawRestrictions)) {
+        restrictionsList = rawRestrictions.map(r => String(r).trim()).filter(Boolean);
+      } else if (typeof rawRestrictions === 'string' && rawRestrictions.trim()) {
+        restrictionsList = rawRestrictions.split(/[,;\/]+/).map(r => r.trim()).filter(Boolean);
+      }
+
+      // Required check: Must indicate at least one restriction code
+      if (restrictionsList.length === 0) {
+        return res.status(400).json({
+          message: 'License Restriction Code(s) are required to rent a motorcycle. Please indicate the restriction codes on the physical driver license.',
+        });
+      }
+
+      // Validation Rule: Must include restriction code A or A1
+      const hasMotorcycleRestriction = restrictionsList.some(code => {
+        const c = code.toUpperCase().trim();
+        return c === 'A' || c === 'A1' || c.startsWith('A ') || c.startsWith('A1 ') || c.includes('MOTORCYCLE');
+      });
+
+      if (!hasMotorcycleRestriction) {
+        return res.status(400).json({
+          message: 'Your license does not include restriction code A or A1, which is required to legally operate a motorcycle in the Philippines. This rental cannot proceed without a valid motorcycle license restriction.',
+        });
+      }
+
+      // Validate expiration date if provided
+      if (rawLicenseExpiry) {
+        const expDate = new Date(rawLicenseExpiry);
+        if (!isNaN(expDate.getTime())) {
+          const today = new Date();
+          today.setHours(0, 0, 0, 0);
+          if (expDate < today) {
+            return res.status(400).json({
+              message: "The provided driver's license has expired. A valid, non-expired license is required to operate a motorcycle.",
+            });
+          }
+        }
+      }
+
+      finalRestrictionsStr = restrictionsList.join(', ');
+      finalLicenseNum = rawLicenseNum ? String(rawLicenseNum).trim() : null;
+      finalLicenseExp = rawLicenseExpiry ? String(rawLicenseExpiry).trim() : null;
+      licenseBadge = `[Driver's License: ${finalLicenseNum || 'On File'} | Expiry: ${finalLicenseExp || 'N/A'} | Restrictions: ${finalRestrictionsStr}${finalDesignatedDriver ? ` | Driver: ${finalDesignatedDriver}` : ''}]`;
+    }
+
+    const finalNotes = notes ? (notes.includes("[Driver's License:") || notes.includes("[Foreign License") ? notes : `${notes}\n${licenseBadge}`) : licenseBadge;
 
     // 1. Verify Customer exists and is active
     const [custRows] = await conn.query('SELECT id, unique_id, full_name, email, phone, status FROM users WHERE id = ?', [targetCustomerId]);
@@ -481,14 +628,17 @@ async function createMotorRental(req, res) {
     const isCustomer = req.user.role === 'customer';
     const requestLifecycle = require('./request-lifecycle.service');
     const paymentDeadline = isCustomer ? requestLifecycle.getPaymentDeadline() : null;
-    let initialStatus = isCustomer ? 'PENDING_PAYMENT' : 'ACTIVE';
+    let initialStatus = isCustomer ? 'PENDING_APPROVAL' : 'ACTIVE';
 
     // Insert into motor_rentals
     const [rentalResult] = await conn.query(
       `INSERT INTO motor_rentals (
         rental_id, customer_id, motor_id, start_datetime, expected_return_datetime,
-        duration, rate, rate_type, total_amount, final_amount, status, notes, payment_deadline, created_by, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+        duration, rate, rate_type, total_amount, final_amount, status, notes,
+        license_type, passport_number, country_of_issuance, foreign_license_number, foreign_license_expiry, idp_number, idp_expiry, idp_category_a,
+        driver_license_number, driver_license_expiry, driver_license_restrictions, designated_driver_name,
+        payment_deadline, created_by, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
       [
         rentalId,
         targetCustomerId,
@@ -501,7 +651,19 @@ async function createMotorRental(req, res) {
         totalAmount,
         totalAmount,
         initialStatus,
-        notes || null,
+        finalNotes,
+        selectedLicenseType,
+        finalPassportNum,
+        finalCountryOfIssuance,
+        finalForeignLicenseNum,
+        finalForeignLicenseExp,
+        finalIdpNum,
+        finalIdpExp,
+        finalIdpCatA,
+        finalLicenseNum,
+        finalLicenseExp,
+        finalRestrictionsStr,
+        finalDesignatedDriver,
         paymentDeadline,
         req.user.id,
       ]
@@ -515,8 +677,13 @@ async function createMotorRental(req, res) {
     const initialPayAmount = req.body.initial_payment ? Number(req.body.initial_payment) : (isCustomer ? 0 : totalAmount);
 
     const [billRes] = await conn.query(`
-      INSERT INTO bills (bill_number, customer_id, motor_rental_id, total_amount, paid_amount, status, issued_by, issued_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, NOW())
+      INSERT INTO bills (
+        bill_number, customer_id, motor_rental_id, total_amount, paid_amount, status,
+        license_type, passport_number, country_of_issuance, foreign_license_number, foreign_license_expiry, idp_number, idp_expiry, idp_category_a,
+        driver_license_number, driver_license_expiry, driver_license_restrictions, designated_driver_name,
+        issued_by, issued_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
     `, [
       billNumber,
       targetCustomerId,
@@ -524,6 +691,18 @@ async function createMotorRental(req, res) {
       totalAmount,
       initialPayAmount,
       initialPayAmount >= totalAmount ? 'paid' : (initialPayAmount > 0 ? 'partially_paid' : 'unpaid'),
+      selectedLicenseType,
+      finalPassportNum,
+      finalCountryOfIssuance,
+      finalForeignLicenseNum,
+      finalForeignLicenseExp,
+      finalIdpNum,
+      finalIdpExp,
+      finalIdpCatA,
+      finalLicenseNum,
+      finalLicenseExp,
+      finalRestrictionsStr,
+      finalDesignatedDriver,
       req.user.id || targetCustomerId,
     ]);
 

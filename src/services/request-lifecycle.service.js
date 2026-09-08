@@ -65,8 +65,9 @@ async function checkPaymentGate(entityType, entityId) {
     customerId = m.customer_id;
     currentStatus = m.status;
 
-    // Search bill by notes or custom field
-    const [billRows] = await pool.query("SELECT id, total_amount, paid_amount FROM bills WHERE customer_id = ? AND (bill_number LIKE ? OR id IN (SELECT bill_id FROM payments WHERE notes LIKE ?))", [
+    // Search bill by motor_rental_id or bill_number
+    const [billRows] = await pool.query("SELECT id, total_amount, paid_amount FROM bills WHERE motor_rental_id = ? OR (customer_id = ? AND (bill_number LIKE ? OR id IN (SELECT bill_id FROM payments WHERE notes LIKE ?)))", [
+      entityId,
       customerId,
       `%${m.rental_id}%`,
       `%${m.rental_id}%`,
@@ -142,7 +143,7 @@ async function handlePaymentReceived(entityType, entityId, paymentInfo = {}) {
   const gate = await checkPaymentGate(entityType, entityId);
   const normStatus = String(gate.currentStatus || '').toLowerCase();
 
-  if (gate.isPaid && (normStatus === 'pending_payment' || normStatus === 'pending_approval' || normStatus === 'pending' || normStatus === 'requested' || normStatus === 'confirmed')) {
+  if (gate.isPaid && (normStatus === 'pending_payment' || normStatus === 'pending_approval' || normStatus === 'pending' || normStatus === 'requested' || normStatus === 'confirmed' || normStatus === 'reserved')) {
     const targetStatus = entityType === 'motor_rental' ? 'ACTIVE' : (entityType === 'booking' ? 'checked_in' : 'active');
     const tableName = entityType === 'booking' ? 'bookings' : (entityType === 'motor_rental' ? 'motor_rentals' : 'activity_rentals');
 
