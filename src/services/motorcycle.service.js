@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const pool = require('../config/db');
+const { validateDriverLicense, DRIVER_LICENSE_ERROR_MSG } = require('../utils/license.util');
 
 /** Helper to save base64 image data URL to disk in uploads folder */
 function saveBase64Image(dataUrl, prefix = 'motor') {
@@ -475,6 +476,21 @@ async function createMotorRental(req, res) {
         const dm = notes.match(/(?:Designated\s*Driver|Driver):\s*([^|\]\n]+)/i);
         if (dm) finalDesignatedDriver = dm[1].trim();
       }
+
+      // Format validation: Exactly A12-34-567890
+      if (!rawLicenseNum || !rawLicenseNum.trim()) {
+        return res.status(400).json({
+          message: "Driver's license number is required.",
+        });
+      }
+
+      const licenseVal = validateDriverLicense(rawLicenseNum.trim());
+      if (!licenseVal.isValid) {
+        return res.status(400).json({
+          message: licenseVal.error || DRIVER_LICENSE_ERROR_MSG,
+        });
+      }
+      rawLicenseNum = rawLicenseNum.trim();
 
       // Convert restrictions to array
       let restrictionsList = [];

@@ -14,6 +14,7 @@ const testFiles = [
   'test_motor_late_fee.js',
   'test_motor_damage.js',
   'test_cancellation_billing.js',
+  'test_driver_license_validation.js',
 ];
 
 async function runTest(file) {
