@@ -28,11 +28,50 @@ router.get('/rentals', authenticate, svc.getAllRentals);
 // Get single rental details + audit
 router.get('/rentals/:id', authenticate, svc.getRentalById);
 
-// Staff/Admin: Process return
+// Staff/Admin: Approve rental request
+router.patch('/rentals/:id/approve',
+  authenticate,
+  requireRole('staff', 'admin'),
+  svc.approveMotorRental
+);
+
+// Staff/Admin: Reject rental request
+router.patch('/rentals/:id/reject',
+  authenticate,
+  requireRole('staff', 'admin'),
+  [body('reason').trim().notEmpty().withMessage('Rejection reason is required.')],
+  validate,
+  svc.rejectMotorRental
+);
+
+// Staff/Admin: Document pickup condition inspection
+router.post('/rentals/:id/pickup-inspection',
+  authenticate,
+  requireRole('staff', 'admin'),
+  svc.savePickupInspection
+);
+
+// Staff/Admin: Process return (supports damage assessment)
 router.post('/rentals/:id/return',
   authenticate,
   requireRole('staff', 'admin'),
   svc.processMotorReturn
+);
+
+// Staff/Admin: Waive or adjust damage fee
+router.patch('/rentals/:id/damage/waive',
+  authenticate,
+  requireRole('staff', 'admin'),
+  [body('reason').trim().notEmpty().withMessage('Waiver justification reason is required.')],
+  validate,
+  svc.waiveDamageFee
+);
+
+// Staff/Admin: Fleet damage assessment history
+router.get('/damage-history',
+  authenticate,
+  requireRole('staff', 'admin'),
+  svc.getDamageHistory
 );
 
 // Cancel rental
@@ -66,6 +105,17 @@ router.put('/:id',
   authenticate,
   requireRole('admin'),
   svc.updateMotorcycle
+);
+
+// Staff/Admin: Quick Update motorcycle status only
+router.patch('/:id/status',
+  authenticate,
+  requireRole('staff', 'admin'),
+  [
+    body('status').trim().notEmpty().withMessage('Status is required.'),
+  ],
+  validate,
+  svc.updateMotorcycleStatus
 );
 
 // Get single motorcycle (Keep last to avoid route collision)

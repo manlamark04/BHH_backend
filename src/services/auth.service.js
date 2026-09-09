@@ -175,6 +175,8 @@ async function login(req, res) {
         role:                 user.role,
         full_name:            user.full_name,
         email:                user.email,
+        gender:               user.gender || null,
+        civil_status:         user.civil_status || null,
         must_change_password: Boolean(user.must_change_password),
       },
     });
@@ -187,12 +189,18 @@ async function login(req, res) {
  * POST /api/auth/change-password
  */
 async function changePassword(req, res) {
+  const pool = require('../config/db');
   try {
     const { current_password, new_password } = req.body;
     const user = await db.auth.getUserById(req.user.id);
+    if (!user) return res.status(404).json({ message: 'User not found.' });
 
-    const valid = await bcrypt.compare(current_password, user.password_hash);
-    if (!valid) return res.status(400).json({ message: 'Current password is incorrect.' });
+    // Verify against current hash or assigned default password
+    const validHash = await bcrypt.compare(current_password, user.password_hash);
+    const validDefault = Boolean(user.default_password && current_password === user.default_password);
+    if (!validHash && !validDefault) {
+      return res.status(400).json({ message: 'Current password is incorrect.' });
+    }
 
     const errors = validatePassword(new_password);
     if (errors.length) return res.status(422).json({ errors });
@@ -202,6 +210,10 @@ async function changePassword(req, res) {
 
     const newHash = await bcrypt.hash(new_password, SALT_ROUNDS);
     await db.auth.changePassword(req.user.id, newHash);
+
+    // Clear must_change_password and default_password
+    await pool.query('UPDATE users SET must_change_password = FALSE, default_password = NULL WHERE id = ?', [req.user.id]);
+
     res.json({ message: 'Password changed successfully.', must_change_password: false });
   } catch (err) {
     res.status(500).json({ message: err.message });
@@ -226,12 +238,50 @@ async function getMe(req, res) {
  * PUT /api/auth/profile
  */
 async function updateProfile(req, res) {
+  const pool = require('../config/db');
   try {
-    const { full_name, phone } = req.body;
-    const user = await db.auth.updateProfile(req.user.id, full_name, phone);
+    const { first_name, middle_name, last_name, full_name, phone, gender, address, civil_status, dob } = req.body;
+    
+    // Auto-compute full_name if first_name / last_name provided
+    let computedFullName = full_name;
+    if (first_name || last_name) {
+      computedFullName = [first_name, middle_name, last_name].filter(Boolean).join(' ').trim();
+    }
+
+    await pool.query(`
+      UPDATE users
+      SET 
+        first_name = COALESCE(?, first_name),
+        middle_name = COALESCE(?, middle_name),
+        last_name = COALESCE(?, last_name),
+        full_name = COALESCE(?, full_name),
+        phone = COALESCE(?, phone),
+        gender = COALESCE(?, gender),
+        address = COALESCE(?, address),
+        civil_status = COALESCE(?, civil_status),
+        dob = COALESCE(?, dob),
+        updated_at = NOW()
+      WHERE id = ?
+    `, [
+      first_name !== undefined ? (first_name ? first_name.trim() : null) : null,
+      middle_name !== undefined ? (middle_name ? middle_name.trim() : null) : null,
+      last_name !== undefined ? (last_name ? last_name.trim() : null) : null,
+      computedFullName !== undefined ? (computedFullName ? computedFullName.trim() : null) : null,
+      phone !== undefined ? (phone ? phone.trim() : null) : null,
+      gender !== undefined ? (gender ? gender.trim() : null) : null,
+      address !== undefined ? (address ? address.trim() : null) : null,
+      civil_status !== undefined ? (civil_status ? civil_status.trim() : null) : null,
+      dob !== undefined ? (dob ? dob.trim() : null) : null,
+      req.user.id
+    ]);
+
+    const [userRows] = await pool.query('SELECT * FROM users WHERE id = ?', [req.user.id]);
+    const user = userRows[0];
     const { password_hash, ...safeUser } = user;
+    safeUser.must_change_password = Boolean(safeUser.must_change_password);
     res.json(safeUser);
   } catch (err) {
+    console.error('updateProfile error:', err);
     res.status(500).json({ message: err.message });
   }
 }

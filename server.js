@@ -1,12 +1,12 @@
-require('dotenv').config();
-const app  = require('./src/app');
-const pool = require('./src/config/db');
-const bcrypt = require('bcryptjs');
-const db   = require('./src/db/procedures');
-const fs   = require('fs');
-const path = require('path');
+const { config } = require('./src/config/env');
+const app        = require('./src/app');
+const pool       = require('./src/config/db');
+const bcrypt     = require('bcryptjs');
+const db         = require('./src/db/procedures');
+const fs         = require('fs');
+const path       = require('path');
 
-const PORT = process.env.PORT || 5000;
+const PORT = config.port;
 
 async function seedInitialAdmin() {
   try {
@@ -28,7 +28,7 @@ async function seedInitialAdmin() {
 }
 
 async function ensureUploadsDir() {
-  const dir = path.join(__dirname, process.env.UPLOADS_DIR || 'uploads');
+  const dir = path.join(__dirname, config.uploadsDir);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 }
 
@@ -40,9 +40,12 @@ async function start() {
     await ensureUploadsDir();
     await seedInitialAdmin();
 
+    const { startScheduler } = require('./src/services/scheduler');
+    startScheduler(60000); // 1 minute auto-cancel check
+
     app.listen(PORT, () => {
       console.log(`🚀 BHH Backend running on http://localhost:${PORT}`);
-      console.log(`   Environment: ${process.env.NODE_ENV || 'development'}`);
+      console.log(`   Environment: ${config.env}`);
     });
   } catch (err) {
     console.error('❌ Failed to start server:', err);

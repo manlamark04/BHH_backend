@@ -13,6 +13,11 @@ const bookingRoutes   = require('./routes/bookings.routes');
 const billingRoutes   = require('./routes/billing.routes');
 const reportRoutes      = require('./routes/reports.routes');
 const motorcycleRoutes  = require('./routes/motorcycle.routes');
+const courtRoutes       = require('./routes/courts.routes');
+const auditRoutes       = require('./routes/audit.routes');
+const notificationRoutes = require('./routes/notifications.routes');
+const inquiryRoutes     = require('./routes/inquiries.routes');
+const { errorHandler, notFoundHandler } = require('./middleware/errorHandler');
 
 const app = express();
 
@@ -30,15 +35,21 @@ app.use(express.urlencoded({ limit: '50mb', extended: true }));
 app.use('/uploads', express.static(path.join(__dirname, '..', process.env.UPLOADS_DIR || 'uploads')));
 
 // ── Routes ─────────────────────────────────────────────────
-app.use('/api/auth',        authRoutes);
-app.use('/api/users',       userRoutes);
-app.use('/api/rooms',       roomRoutes);
-app.use('/api/services',    serviceRoutes);
-app.use('/api/activities',  activityRoutes);
-app.use('/api/motorcycles', motorcycleRoutes);
-app.use('/api/bookings',    bookingRoutes);
-app.use('/api/bills',       billingRoutes);
-app.use('/api/reports',     reportRoutes);
+app.use('/api/auth',          authRoutes);
+app.use('/api/users',         userRoutes);
+app.use('/api/rooms',         roomRoutes);
+app.use('/api/services',      serviceRoutes);
+app.use('/api/activities',    activityRoutes);
+app.use('/api/motorcycles',   motorcycleRoutes);
+app.use('/api/courts',        courtRoutes);
+app.use('/api/bookings',      bookingRoutes);
+app.use('/api/bills',         billingRoutes);
+app.use('/api/reports',       reportRoutes);
+app.use('/api/audit',         auditRoutes);
+app.use('/api/notifications', notificationRoutes);
+app.use('/api/inquiries',     inquiryRoutes);
+
+
 
 const pool = require('./config/db');
 
@@ -417,13 +428,8 @@ app.get('/api/health', async (req, res) => {
   });
 });
 
-// ── 404 handler ─────────────────────────────────────────────
-app.use((req, res) => res.status(404).json({ message: 'Route not found.' }));
-
-// ── Global error handler ────────────────────────────────────
-app.use((err, req, res, next) => {
-  console.error(err.stack);
-  res.status(500).json({ message: 'Internal server error.', error: process.env.NODE_ENV === 'development' ? err.message : undefined });
-});
+// ── 404 & Global error handlers ─────────────────────────────
+app.use(notFoundHandler);
+app.use(errorHandler);
 
 module.exports = app;

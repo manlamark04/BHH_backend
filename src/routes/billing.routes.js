@@ -2,15 +2,20 @@ const express  = require('express');
 const { body } = require('express-validator');
 const router   = express.Router();
 const svc      = require('../services/billing.service');
+const eodSvc   = require('../services/eod.service');
 const { authenticate } = require('../middleware/auth');
 const { requireRole }  = require('../middleware/roles');
 const { validate }     = require('../middleware/validate');
+
+// GET /api/bills/eod-report — Staff/Admin: Daily cashier shift turnover report
+router.get('/eod-report', authenticate, requireRole('staff', 'admin'), eodSvc.getEODReport);
 
 // GET /api/bills — Staff/Admin
 router.get('/', authenticate, requireRole('staff', 'admin'), svc.getAllBills);
 
 // GET /api/bills/my — Customer: own bills/history
 router.get('/my', authenticate, requireRole('customer'), svc.getMyBills);
+
 
 // GET /api/bills/:id/items — line items
 router.get('/:id/items', authenticate, requireRole('staff', 'admin', 'customer'), svc.getBillLineItems);
@@ -47,6 +52,24 @@ router.post('/payments/:id/refund',
     body('reason').trim().notEmpty().withMessage('Refund reason is required.'),
   ],
   validate, svc.refundPayment
+);
+
+// POST /api/bills/:id/cancel — Staff/Admin: cancel an unpaid bill
+router.post('/:id/cancel',
+  authenticate, requireRole('staff', 'admin'),
+  svc.cancelBill
+);
+
+// POST /api/bills/:id/verify-license — Staff/Admin: mark driver's license as verified
+router.post('/:id/verify-license',
+  authenticate, requireRole('staff', 'admin'),
+  svc.verifyDriverLicense
+);
+
+// POST /api/bills/:id/flag-license — Staff/Admin: flag discrepancy or mismatch in driver's license
+router.post('/:id/flag-license',
+  authenticate, requireRole('staff', 'admin'),
+  svc.flagDriverLicense
 );
 
 module.exports = router;
