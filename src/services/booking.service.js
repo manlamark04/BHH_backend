@@ -576,35 +576,20 @@ async function cancelBooking(req, res) {
   }
 }
 
-/** POST /api/bookings/:id/no-show — Staff manual mark as no-show */
+/** POST /api/bookings/:id/no-show — Staff manual mark as no-show (no fee charged) */
 async function markBookingNoShow(req, res) {
   try {
     const bookingId = parseInt(req.params.id, 10);
-    const { custom_fee, reason } = req.body;
+    const { reason } = req.body;
     const noshowService = require('./noshow.service');
     const result = await noshowService.processBookingNoShow(bookingId, {
       staffUser: req.user,
       triggerType: 'manual_override',
-      customFee: custom_fee !== undefined ? custom_fee : null,
       reason: reason || 'Staff manually marked booking as No-Show',
     });
     res.json(result);
   } catch (err) {
     console.error('markBookingNoShow error:', err);
-    res.status(err.statusCode || 500).json({ message: err.message });
-  }
-}
-
-/** PATCH /api/bookings/:id/waive-no-show — Staff waive or adjust no-show fee */
-async function waiveBookingNoShowFee(req, res) {
-  try {
-    const bookingId = parseInt(req.params.id, 10);
-    const { reason, new_fee } = req.body;
-    const noshowService = require('./noshow.service');
-    const result = await noshowService.waiveNoShowFee(bookingId, req.user, reason, new_fee !== undefined ? new_fee : 0);
-    res.json(result);
-  } catch (err) {
-    console.error('waiveBookingNoShowFee error:', err);
     res.status(err.statusCode || 500).json({ message: err.message });
   }
 }
@@ -1606,7 +1591,6 @@ module.exports = {
   rejectBooking,
   cancelBooking,
   markBookingNoShow,
-  waiveBookingNoShowFee,
   processNoShowsManual,
   getBookingAuditTrail,
   updateBookingStatus,

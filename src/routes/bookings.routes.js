@@ -132,13 +132,6 @@ router.post('/:id/no-show',
   svc.markBookingNoShow
 );
 
-// PATCH /api/bookings/:id/waive-no-show — Staff/Admin: Waive or adjust no-show fee
-router.patch('/:id/waive-no-show',
-  authenticate, requireRole('staff', 'admin'),
-  [body('reason').trim().notEmpty().withMessage('A waiver justification reason is required.')],
-  validate,
-  svc.waiveBookingNoShowFee
-);
 
 // POST /api/bookings/:id/payment — Staff/Admin: Record payment
 router.post('/:id/payment',
