@@ -48,13 +48,13 @@ async function processBookingNoShow(bookingId, { staffUser = null, triggerType =
       throw err;
     }
 
-    if (currentStatus === 'no_show') {
+    if (currentStatus === 'cancelled') {
       await conn.rollback();
-      return { success: true, bookingId, message: 'Booking is already marked as No-Show.' };
+      return { success: true, bookingId, message: 'Booking is already marked as Cancelled.' };
     }
 
-    if (['cancelled', 'rejected', 'checked_out'].includes(currentStatus)) {
-      const err = new Error(`Cannot mark booking with status "${booking.status}" as No-Show.`);
+    if (['rejected', 'checked_out'].includes(currentStatus)) {
+      const err = new Error(`Cannot cancel booking with status "${booking.status}".`);
       err.statusCode = 400;
       throw err;
     }
@@ -63,12 +63,12 @@ async function processBookingNoShow(bookingId, { staffUser = null, triggerType =
       ? 'Automated midnight cutoff: Guest failed to check in by scheduled check-in date.'
       : 'Staff manual override: Guest failed to arrive for scheduled reservation.');
 
-    // 1. Update booking status to no_show (no fee charged)
+    // 1. Update booking status to cancelled (no fee charged)
     await conn.query(`
       UPDATE bookings 
-      SET status = 'no_show',
+      SET status = 'cancelled',
+          cancellation_fee = 0,
           no_show_fee = 0,
-          no_show_at = NOW(),
           rejection_reason = ?,
           updated_at = NOW()
       WHERE id = ?
@@ -105,7 +105,7 @@ async function processBookingNoShow(bookingId, { staffUser = null, triggerType =
       entityType: 'booking',
       entityId: bookingId,
       fromStatus: booking.status,
-      toStatus: 'no_show',
+      toStatus: 'cancelled',
       performedBy: performerId,
       performedByName: performerName,
       triggerType: triggerType === 'system_cutoff' ? 'system' : 'manual',
@@ -120,20 +120,20 @@ async function processBookingNoShow(bookingId, { staffUser = null, triggerType =
     });
 
     // 5. Guest Notification
-    console.log(`📨 [Guest Notification] No-Show alert generated for ${booking.customer_name} <${booking.customer_email}>: Reservation #${bookingId} marked as No-Show. No fee charged. Room ${booking.room_number} returned to Available.`);
+    console.log(`📨 [Guest Notification] Cancellation alert generated for ${booking.customer_name} <${booking.customer_email}>: Reservation #${bookingId} cancelled due to non-arrival. Room ${booking.room_number} returned to Available.`);
 
     await conn.commit();
 
     return {
       success: true,
       bookingId,
-      status: 'no_show',
+      status: 'cancelled',
       room_number: booking.room_number,
       room_status: 'available',
       no_show_fee: 0,
       remaining_balance: 0,
       refund_pending: 0,
-      message: `Booking #${bookingId} marked as No-Show. Room ${booking.room_number} automatically reverted to Available. No fee charged.`,
+      message: `Booking #${bookingId} marked as Cancelled. Room ${booking.room_number} automatically reverted to Available. No fee charged.`,
     };
   } catch (err) {
     await conn.rollback();
@@ -151,7 +151,7 @@ async function sweepExpiredCheckIns() {
     const [expiredBookings] = await pool.query(`
       SELECT b.id, b.room_id, b.check_in, b.check_out, b.booking_type, b.duration_hours, b.check_in_time
       FROM bookings b
-      WHERE b.status IN ('confirmed', 'approved')
+      WHERE b.status IN ('confirmed', 'approved', 'pending_payment', 'pending', 'requested')
         AND (
           -- For standard overnight stays: check-in date is strictly in the past (past 11:59:59 PM of check-in date)
           (b.booking_type != 'short_time' AND DATE(b.check_in) < CURDATE())
@@ -172,7 +172,7 @@ async function sweepExpiredCheckIns() {
     }
 
     if (processedCount > 0) {
-      console.log(`⏰ No-Show Sweeper: Processed ${processedCount} expired reservation(s) as No-Show (no fee charged).`);
+      console.log(`⏰ No-Show Sweeper: Processed ${processedCount} expired reservation(s) as Cancelled (no fee charged).`);
     }
 
     return processedCount;
