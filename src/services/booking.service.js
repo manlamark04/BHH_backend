@@ -137,11 +137,11 @@ async function getAllBookings(req, res) {
   }
 }
 
-/** GET /api/bookings/approval-queue — Staff/Admin: items in pending_approval */
+/** GET /api/bookings/approval-queue — DEPRECATED: Staff/Admin items in pending_approval */
 async function getApprovalQueue(req, res) {
   try {
-    req.query.status = 'pending_approval';
-    return await getAllBookings(req, res);
+    // Returns empty array as approvals are removed
+    res.json([]);
   } catch (err) {
     console.error('getApprovalQueue error:', err);
     res.status(500).json({ message: err.message });
@@ -338,7 +338,7 @@ async function createBooking(req, res) {
     }
 
     // ── Enforce 1-Stay-at-a-Time Rule (Option B: Multiple rooms allowed for same stay) ──
-    // A guest who already has an in-progress reservation (pending_payment, pending_approval, confirmed, approved, active, checked_in)
+    // A guest who already has an in-progress reservation (pending_payment, confirmed, approved, active, checked_in)
     // can reserve multiple rooms for the same stay dates (family/group trip),
     // but cannot hold separate future or disconnected stays until their current stay is checked out, cancelled, or rejected.
     const [existingStays] = await pool.query(`
@@ -423,7 +423,7 @@ async function createBooking(req, res) {
 
       // Set payment deadline (e.g. NOW + 24 hours)
       const paymentDeadline = requestLifecycle.getPaymentDeadline();
-      let initialStatus = 'pending_approval';
+      let initialStatus = 'pending_payment';
 
       // Insert booking
       const [result] = await conn.query(`
@@ -495,7 +495,7 @@ async function createBooking(req, res) {
       // Update room status:
       if (initialStatus === 'checked_in') {
         await conn.query("UPDATE rooms SET status = 'occupied', updated_at = NOW() WHERE id = ?", [room_id]);
-      } else if (initialStatus === 'confirmed') {
+      } else {
         await conn.query("UPDATE rooms SET status = 'reserved', updated_at = NOW() WHERE id = ?", [room_id]);
       }
 
@@ -666,7 +666,7 @@ async function updateBookingStatus(req, res) {
     await pool.query('UPDATE bookings SET status = ?, updated_at = NOW() WHERE id = ?', [normStatus, bookingId]);
 
     // Synchronize room status
-    if (normStatus === 'confirmed' || normStatus === 'approved') {
+    if (['confirmed', 'approved', 'pending_payment', 'requested', 'pending'].includes(normStatus)) {
       await pool.query("UPDATE rooms SET status = 'reserved', updated_at = NOW() WHERE id = ?", [booking.room_id]);
     } else if (normStatus === 'checked_in') {
       await pool.query("UPDATE rooms SET status = 'occupied', updated_at = NOW() WHERE id = ?", [booking.room_id]);
@@ -827,7 +827,7 @@ async function recordBookingPayment(req, res) {
     const billStatus = totalPaid >= totalPrice ? 'paid' : (totalPaid > 0 ? 'partially_paid' : 'unpaid');
     await pool.query('UPDATE bills SET paid_amount = ?, status = ? WHERE id = ?', [totalPaid, billStatus, billId]);
 
-    // Trigger state machine advancement from pending_payment -> pending_approval
+    // Trigger state machine advancement from pending_payment -> confirmed
     const transitionResult = await requestLifecycle.handlePaymentReceived('booking', bookingId, {
       userId: req.user.id,
       userName: req.user.full_name || req.user.username,
@@ -1354,7 +1354,7 @@ async function updateRentalStatus(req, res) {
   try {
     const { status, remarks } = req.body;
     const rentalId = parseInt(req.params.id);
-    const validStatuses = ['pending_payment', 'pending_approval', 'confirmed', 'active', 'completed', 'cancelled', 'rejected'];
+    const validStatuses = ['pending_payment', 'confirmed', 'active', 'completed', 'cancelled', 'rejected'];
     const normStatus = status.toLowerCase().replace('-', '_');
 
     if (normStatus === 'confirmed') return await approveRental(req, res);

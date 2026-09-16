@@ -552,7 +552,7 @@ async function createMotorRental(req, res) {
     }
 
     // 1b. Enforce One-Motorcycle-Rental-at-a-Time rule:
-    // A guest who already has an in-progress rental (PENDING_PAYMENT, PENDING_APPROVAL, ACTIVE, RESERVED, OVERDUE)
+    // A guest who already has an in-progress rental (PENDING_PAYMENT, ACTIVE, RESERVED, OVERDUE)
     // cannot rent another motorcycle until their current rental is COMPLETED, CANCELLED, or REJECTED.
     const [existingRentals] = await conn.query(
       `SELECT mr.id, mr.rental_id, mr.status, mr.start_datetime, mr.expected_return_datetime,
@@ -560,7 +560,7 @@ async function createMotorRental(req, res) {
        FROM motor_rentals mr
        JOIN motorcycles m ON m.id = mr.motor_id
        WHERE mr.customer_id = ?
-         AND mr.status IN ('PENDING_PAYMENT', 'PENDING_APPROVAL', 'ACTIVE', 'RESERVED', 'OVERDUE')
+         AND mr.status IN ('PENDING_PAYMENT', 'ACTIVE', 'RESERVED', 'OVERDUE')
        ORDER BY mr.id DESC
        LIMIT 1`,
       [targetCustomerId]
@@ -647,7 +647,7 @@ async function createMotorRental(req, res) {
     const isCustomer = req.user.role === 'customer';
     const requestLifecycle = require('./request-lifecycle.service');
     const paymentDeadline = isCustomer ? requestLifecycle.getPaymentDeadline() : null;
-    let initialStatus = isCustomer ? 'PENDING_APPROVAL' : 'ACTIVE';
+    let initialStatus = isCustomer ? 'PENDING_PAYMENT' : 'ACTIVE';
 
     // Insert into motor_rentals
     const [rentalResult] = await conn.query(

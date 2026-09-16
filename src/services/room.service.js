@@ -49,7 +49,7 @@ async function getRooms(req, res) {
           b.id, b.room_id, u.full_name AS customer_name, b.check_in, b.check_out
         FROM bookings b
         JOIN users u ON u.id = b.customer_id
-        WHERE b.status IN ('confirmed', 'approved')
+        WHERE b.status IN ('confirmed', 'approved', 'pending_payment', 'pending', 'requested')
       ) res_bkg ON res_bkg.room_id = r.id
       WHERE 1=1
     `;

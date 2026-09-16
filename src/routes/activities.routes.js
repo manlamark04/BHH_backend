@@ -9,9 +9,9 @@ const { validate }     = require('../middleware/validate');
 // GET /api/activities — public
 router.get('/', svc.getActivities);
 
-// POST /api/activities — Admin
+// POST /api/activities — Staff/Admin
 router.post('/',
-  authenticate, requireRole('admin'),
+  authenticate, requireRole('staff', 'admin'),
   [
     body('name').trim().notEmpty(),
     body('price_per_unit').isFloat({ min: 0 }),
@@ -20,7 +20,7 @@ router.post('/',
   validate, svc.createActivity
 );
 
-// PUT /api/activities/:id — Admin
-router.put('/:id', authenticate, requireRole('admin'), validate, svc.updateActivity);
+// PUT /api/activities/:id — Staff/Admin
+router.put('/:id', authenticate, requireRole('staff', 'admin'), validate, svc.updateActivity);
 
 module.exports = router;

@@ -42,7 +42,7 @@ async function getCourts(req, res) {
       FROM activity_rentals ar
       JOIN users u ON u.id = ar.customer_id
       WHERE ar.court_id IS NOT NULL
-        AND ar.status IN ('active', 'confirmed', 'approved', 'pending_payment', 'pending_approval', 'pending')
+        AND ar.status IN ('active', 'confirmed', 'approved', 'pending_payment', 'pending')
       ORDER BY ar.start_time ASC
     `);
 
@@ -79,7 +79,7 @@ async function getCourts(req, res) {
       const courtRentals = activeRentals.filter((r) => r.court_id === court.id);
       const activeMatch = courtRentals.find((r) => String(r.status).toLowerCase() === 'active');
       const upcomingMatch = courtRentals.find((r) => ['confirmed', 'approved'].includes(String(r.status).toLowerCase()));
-      const pendingMatch = courtRentals.find((r) => ['pending_payment', 'pending_approval', 'pending'].includes(String(r.status).toLowerCase()));
+      const pendingMatch = courtRentals.find((r) => ['pending_payment', 'pending'].includes(String(r.status).toLowerCase()));
 
       let liveStatus = court.status;
       if (court.status === 'AVAILABLE') {
@@ -197,6 +197,13 @@ async function updateCourt(req, res) {
       SET name = ?, hourly_rate = ?, status = ?, description = ?, image_url = ?, updated_at = NOW()
       WHERE id = ?
     `, [updatedName, updatedRate, updatedStatus, updatedDesc, updatedImage, courtId]);
+
+    // Also keep activity price_per_unit in sync for pickleball
+    if (hourly_rate !== undefined) {
+      try {
+        await pool.query('UPDATE activities SET price_per_unit = ? WHERE id = 2 OR LOWER(name) LIKE "%pickleball%"', [updatedRate]);
+      } catch (_) {}
+    }
 
     const [updated] = await pool.query('SELECT * FROM courts WHERE id = ?', [courtId]);
     updated[0].hourly_rate = Number(updated[0].hourly_rate);

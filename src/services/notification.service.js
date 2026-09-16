@@ -27,7 +27,7 @@ async function getNotificationSummary(req, res) {
       FROM bookings b
       JOIN users u ON u.id = b.customer_id
       LEFT JOIN rooms r ON r.id = b.room_id
-      WHERE b.status IN ('pending', 'pending_approval', 'requested')
+      WHERE b.status IN ('pending', 'requested', 'pending_payment')
       ORDER BY b.created_at DESC
       LIMIT 10
     `);
