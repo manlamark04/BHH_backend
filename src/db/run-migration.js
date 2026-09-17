@@ -41,8 +41,18 @@ async function migrate() {
   }
 
   const [colsAfter] = await pool.query('DESCRIBE bookings');
-  console.log('Migration complete. Current columns:');
+  console.log('Migration complete. Current columns for bookings:');
   console.table(colsAfter.map(c => ({ Field: c.Field, Type: c.Type, Null: c.Null, Default: c.Default })));
+
+  // Add profile_photo_url to users table
+  const [userCols] = await pool.query('DESCRIBE users');
+  const userFields = userCols.map(c => c.Field);
+  
+  if (!userFields.includes('profile_photo_url')) {
+    console.log('Adding profile_photo_url to users table...');
+    await pool.query("ALTER TABLE users ADD COLUMN profile_photo_url VARCHAR(255) DEFAULT NULL");
+    console.log('Added profile_photo_url to users table.');
+  }
   process.exit(0);
 }
 
