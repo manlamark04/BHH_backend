@@ -16,6 +16,7 @@ router.post('/categories', authenticate, requireRole('admin'), svc.createCategor
 router.get('/products', requireRole('admin', 'staff', 'customer'), svc.getProducts);
 router.post('/products', requireRole('admin'), upload.single('image'), svc.createProduct); // Only admin creates products
 router.put('/products/:id', requireRole('admin'), upload.single('image'), svc.updateProduct);
+router.delete('/products/:id', requireRole('admin'), svc.deleteProduct);
 router.patch('/products/:id/stock', requireRole('admin', 'staff'), svc.updateStock); // Staff can restock? Or just admin. We'll allow staff to restock.
 
 // POS Checkout

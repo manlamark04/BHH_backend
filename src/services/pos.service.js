@@ -41,14 +41,17 @@ async function getProducts(req, res) {
 async function createProduct(req, res) {
   try {
     const { category_id, name, sku, barcode, description, price, stock_quantity, reorder_level } = req.body;
+    let has_variants = req.body.has_variants;
+    if (typeof has_variants === 'string') has_variants = has_variants === 'true' || has_variants === '1';
+    else has_variants = !!has_variants;
     let image_url = req.body.image_url || null;
     if (req.file) {
       image_url = `/uploads/${req.file.filename}`;
     }
     const [result] = await pool.query(
-      `INSERT INTO pos_products (category_id, name, sku, barcode, description, price, stock_quantity, reorder_level, image_url)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [category_id, name, sku || null, barcode || null, description || null, price || 0, stock_quantity || 0, reorder_level || 5, image_url]
+      `INSERT INTO pos_products (category_id, name, sku, barcode, description, price, stock_quantity, reorder_level, image_url, has_variants)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [category_id, name, sku || null, barcode || null, description || null, price || 0, stock_quantity || 0, reorder_level || 5, image_url, has_variants]
     );
     res.status(201).json({ message: 'Product created successfully', id: result.insertId });
   } catch (err) {
@@ -60,6 +63,10 @@ async function updateProduct(req, res) {
   try {
     const { id } = req.params;
     const { category_id, name, sku, barcode, description, price, stock_quantity, reorder_level, status } = req.body;
+    let has_variants = req.body.has_variants;
+    if (typeof has_variants === 'string') has_variants = has_variants === 'true' || has_variants === '1';
+    else if (has_variants === undefined) has_variants = false;
+    else has_variants = !!has_variants;
     
     let image_url = req.body.image_url || null;
     if (req.file) {
@@ -68,13 +75,23 @@ async function updateProduct(req, res) {
     
     await pool.query(
       `UPDATE pos_products 
-       SET category_id=?, name=?, sku=?, barcode=?, description=?, price=?, stock_quantity=?, reorder_level=?, status=? ${req.file ? ', image_url=?' : ''}
+       SET category_id=?, name=?, sku=?, barcode=?, description=?, price=?, stock_quantity=?, reorder_level=?, status=?, has_variants=? ${req.file ? ', image_url=?' : ''}
        WHERE id=?`,
       req.file 
-        ? [category_id, name, sku || null, barcode || null, description || null, price, stock_quantity, reorder_level, status || 'active', image_url, id]
-        : [category_id, name, sku || null, barcode || null, description || null, price, stock_quantity, reorder_level, status || 'active', id]
+        ? [category_id, name, sku || null, barcode || null, description || null, price, stock_quantity, reorder_level, status || 'active', has_variants, image_url, id]
+        : [category_id, name, sku || null, barcode || null, description || null, price, stock_quantity, reorder_level, status || 'active', has_variants, id]
     );
     res.json({ message: 'Product updated successfully' });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+}
+
+async function deleteProduct(req, res) {
+  try {
+    const { id } = req.params;
+    await pool.query('DELETE FROM pos_products WHERE id = ?', [id]);
+    res.json({ message: 'Product deleted successfully' });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
@@ -259,6 +276,7 @@ module.exports = {
   getProducts,
   createProduct,
   updateProduct,
+  deleteProduct,
   updateStock,
   checkout,
   getOrders,
