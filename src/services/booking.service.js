@@ -1,5 +1,6 @@
 const pool = require('../config/db');
 const db   = require('../db/procedures');
+const { notifyStaffAndAdmin, notifyUser } = require('./notification.emitter');
 const requestLifecycle = require('./request-lifecycle.service');
 
 // ── Short-Time Booking Configuration ──────────────────────────

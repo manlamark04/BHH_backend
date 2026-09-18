@@ -19,7 +19,7 @@ const storage = multer.diskStorage({
     const userId = req.user ? req.user.id : 'unknown';
     const ext = path.extname(file.originalname);
     const hash = crypto.randomBytes(8).toString('hex');
-    cb(null, `profile_${userId}_${hash}${ext}`);
+    cb(null, `upload_${userId}_${hash}${ext}`);
   }
 });
 

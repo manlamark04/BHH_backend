@@ -3,6 +3,8 @@ const fs = require('fs');
 const path = require('path');
 const pool   = require('../config/db');
 const db     = require('../db/procedures');
+const { notifyStaffAndAdmin, notifyUser } = require('./notification.emitter');
+const { sendEmail } = require('./email.service');
 const { SALT_ROUNDS } = require('./auth.service');
 
 /** Helper to record customer audit log within a connection/pool */
@@ -667,6 +669,20 @@ async function approveUser(req, res) {
   try {
     const user = await db.users.approve(parseInt(req.params.id, 10), req.user.id);
     if (!user) return res.status(404).json({ message: 'User not found.' });
+    
+    notifyStaffAndAdmin();
+    notifyUser(user.id);
+    
+    if (user.email) {
+      sendEmail(
+        user.email,
+        'Account Approved - Cambacay Breeze Inn',
+        `<h1>Welcome to Cambacay Breeze Inn!</h1>
+         <p>Hi ${user.full_name},</p>
+         <p>Your account has been approved by the administrator. You can now log in and start booking rooms and activities.</p>`
+      );
+    }
+    
     res.json({ message: 'User approved.', user });
   } catch (err) {
     res.status(500).json({ message: err.message });
@@ -679,6 +695,21 @@ async function rejectUser(req, res) {
     const { reason } = req.body;
     const user = await db.users.reject(parseInt(req.params.id, 10), req.user.id, reason || null);
     if (!user) return res.status(404).json({ message: 'User not found.' });
+    
+    notifyStaffAndAdmin();
+    notifyUser(user.id);
+
+    if (user.email) {
+      sendEmail(
+        user.email,
+        'Account Registration Update - Cambacay Breeze Inn',
+        `<h1>Cambacay Breeze Inn</h1>
+         <p>Hi ${user.full_name},</p>
+         <p>Unfortunately, your account registration could not be approved at this time.</p>
+         ${reason ? `<p>Reason: ${reason}</p>` : ''}`
+      );
+    }
+    
     res.json({ message: 'User rejected.', user });
   } catch (err) {
     res.status(500).json({ message: err.message });

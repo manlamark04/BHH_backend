@@ -126,6 +126,8 @@ async function register(req, res) {
       ]
     );
 
+    notifyStaffAndAdmin();
+    notifyStaffAndAdmin();
     res.status(201).json({
       message: 'Account created. Awaiting admin approval.',
       unique_id: uniqueId,

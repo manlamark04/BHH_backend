@@ -115,4 +115,12 @@ const dashboards = {
   admin: () => callOne('sp_get_admin_dashboard', []),
 };
 
-module.exports = { auth, users, rooms, services, activities, bookings, rentals, billing, payments, reports, dashboards };
+// ─── REVIEWS ───────────────────────────────────────────────────
+const reviews = {
+  create:        (customerId, rating, comment) => callOne('sp_create_review', [customerId, rating, comment || null]),
+  getAll:        () => call('sp_get_all_reviews', []),
+  getForCustomer:(customerId) => call('sp_get_customer_reviews', [customerId]),
+  toggleVisibility: (reviewId) => callOne('sp_toggle_review_visibility', [reviewId]),
+};
+
+module.exports = { auth, users, rooms, services, activities, bookings, rentals, billing, payments, reports, dashboards, reviews };

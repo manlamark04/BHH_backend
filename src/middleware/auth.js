@@ -31,4 +31,25 @@ async function authenticate(req, res, next) {
   }
 }
 
-module.exports = { authenticate };
+/**
+ * Verifies JWT if present, but doesn't fail if absent.
+ */
+async function optionalAuthenticate(req, res, next) {
+  try {
+    const header = req.headers.authorization;
+    if (!header || !header.startsWith('Bearer ')) {
+      return next(); // Proceed without req.user
+    }
+    const token = header.split(' ')[1];
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    const user = await db.auth.getUserById(decoded.id);
+    if (user && user.status === 'active') {
+      req.user = user;
+    }
+  } catch (err) {
+    // Ignore error, proceed without req.user
+  }
+  next();
+}
+
+module.exports = { authenticate, optionalAuthenticate };
