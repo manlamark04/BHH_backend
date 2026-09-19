@@ -143,11 +143,12 @@ async function checkout(req, res) {
         throw new Error(`Insufficient stock for ${product.name}. Only ${product.stock_quantity} left.`);
       }
       
-      const subtotal = product.price * item.quantity;
+      const finalPrice = item.variant_price !== undefined ? Number(item.variant_price) : product.price;
+      const subtotal = finalPrice * item.quantity;
       totalAmount += subtotal;
       
       // We attach the validated price for insertion later
-      item.validated_price = product.price;
+      item.validated_price = finalPrice;
       item.validated_subtotal = subtotal;
     }
 
@@ -162,9 +163,9 @@ async function checkout(req, res) {
     // 4. Create Order Items & Deduct Stock
     for (const item of items) {
       await conn.query(
-        `INSERT INTO pos_order_items (order_id, product_id, quantity, unit_price, subtotal)
-         VALUES (?, ?, ?, ?, ?)`,
-        [orderId, item.product_id, item.quantity, item.validated_price, item.validated_subtotal]
+        `INSERT INTO pos_order_items (order_id, product_id, quantity, unit_price, subtotal, variant_name)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [orderId, item.product_id, item.quantity, item.validated_price, item.validated_subtotal, item.variant_name || null]
       );
       
       await conn.query(
