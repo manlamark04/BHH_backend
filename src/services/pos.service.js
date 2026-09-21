@@ -135,11 +135,11 @@ async function checkout(req, res) {
     // 2. Validate items & calculate total
     for (const item of items) {
       // Check stock and price
-      const [prodRows] = await conn.query('SELECT price, stock_quantity, name FROM pos_products WHERE id = ? FOR UPDATE', [item.product_id]);
+      const [prodRows] = await conn.query('SELECT price, stock_quantity, name, has_variants FROM pos_products WHERE id = ? FOR UPDATE', [item.product_id]);
       if (prodRows.length === 0) throw new Error(`Product ID ${item.product_id} not found.`);
       
       const product = prodRows[0];
-      if (product.stock_quantity < item.quantity) {
+      if (!product.has_variants && product.stock_quantity < item.quantity) {
         throw new Error(`Insufficient stock for ${product.name}. Only ${product.stock_quantity} left.`);
       }
       
@@ -150,6 +150,7 @@ async function checkout(req, res) {
       // We attach the validated price for insertion later
       item.validated_price = finalPrice;
       item.validated_subtotal = subtotal;
+      item.has_variants = product.has_variants;
     }
 
     // 3. Create Order
@@ -168,10 +169,12 @@ async function checkout(req, res) {
         [orderId, item.product_id, item.quantity, item.validated_price, item.validated_subtotal, item.variant_name || null]
       );
       
-      await conn.query(
-        `UPDATE pos_products SET stock_quantity = stock_quantity - ? WHERE id = ?`,
-        [item.quantity, item.product_id]
-      );
+      if (!item.has_variants) {
+        await conn.query(
+          `UPDATE pos_products SET stock_quantity = stock_quantity - ? WHERE id = ?`,
+          [item.quantity, item.product_id]
+        );
+      }
     }
 
     await conn.commit();
