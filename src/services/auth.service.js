@@ -169,6 +169,8 @@ async function login(req, res) {
       expiresIn: process.env.JWT_EXPIRES_IN || '7d',
     });
 
+    const fullUser = await db.auth.getUserById(user.id);
+
     res.json({
       token,
       user: {
@@ -180,6 +182,7 @@ async function login(req, res) {
         gender:               user.gender || null,
         civil_status:         user.civil_status || null,
         must_change_password: Boolean(user.must_change_password),
+        profile_photo_url:    fullUser.profile_photo_url || null,
       },
     });
   } catch (err) {

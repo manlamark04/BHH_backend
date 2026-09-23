@@ -121,6 +121,7 @@ async function getAllBills(req, res) {
         u.phone AS customer_phone,
         su.full_name AS staff_name,
         bk.status AS booking_status,
+        bk.is_arrived AS is_arrived,
         bk.room_id,
         bk.booking_type,
         bk.check_in_time,
@@ -359,6 +360,7 @@ async function getAllBills(req, res) {
         booking_id: b.booking_id,
         booking_ref: bookingRef,
         booking_status: b.booking_status,
+        is_arrived: b.is_arrived,
         booking_type: b.booking_type,
         check_in_time: b.check_in_time,
         duration_hours: b.duration_hours,
@@ -411,7 +413,13 @@ async function getAllBills(req, res) {
     });
 
     // Optional status or search filter
-    let results = formattedBills;
+    let results = formattedBills.filter((b) => {
+      // Hide Confirmed/Reserved reservations if they haven't explicitly arrived yet
+      const isConfirmedNotArrived = ['requested', 'confirmed', 'reserved', 'pending', 'pending_payment'].includes(String(b.booking_status || '').toLowerCase()) && Number(b.is_arrived || 0) === 0;
+      if (isConfirmedNotArrived) return false;
+      return true;
+    });
+
     if (status && status !== 'All') {
       results = results.filter((b) => b.status.toLowerCase() === status.toLowerCase());
     }

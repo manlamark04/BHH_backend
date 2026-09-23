@@ -9,9 +9,26 @@ const requestLifecycle = require('./request-lifecycle.service');
 const SHORT_TIME_MULTIPLIER = 2.0;
 const SHORT_TIME_MAX_HOURS  = 5;
 
+let bookingColumnsChecked = false;
+async function ensureBookingColumns() {
+  if (bookingColumnsChecked) return;
+  try {
+    const [rows] = await pool.query(
+      `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'bookings' AND COLUMN_NAME = 'is_arrived'`
+    );
+    if (rows.length === 0) {
+      await pool.query(`ALTER TABLE \`bookings\` ADD COLUMN \`is_arrived\` TINYINT(1) NOT NULL DEFAULT 0`);
+    }
+    bookingColumnsChecked = true;
+  } catch (err) {
+    console.error('Failed to ensure booking columns:', err);
+  }
+}
+
 /** GET /api/bookings — Staff/Admin: all bookings with full customer, room, and payment details */
 async function getAllBookings(req, res) {
   try {
+    await ensureBookingColumns();
     await requestLifecycle.syncPaidRequestsToConfirmed();
     const { status, search } = req.query;
 
@@ -24,6 +41,7 @@ async function getAllBookings(req, res) {
         u.unique_id AS customer_code,
         u.email AS customer_email,
         u.phone AS customer_phone,
+        b.is_arrived,
         b.room_id,
         r.room_number,
         r.room_type,
@@ -1582,12 +1600,26 @@ async function extendRental(req, res) {
   }
 }
 
+/** PATCH /api/bookings/:id/arrive */
+async function markArrived(req, res) {
+  try {
+    await ensureBookingColumns();
+    const bookingId = parseInt(req.params.id);
+    await pool.query('UPDATE bookings SET is_arrived = 1, updated_at = NOW() WHERE id = ?', [bookingId]);
+    res.json({ message: 'Guest marked as arrived.' });
+  } catch (err) {
+    console.error('markArrived error:', err);
+    res.status(500).json({ message: err.message });
+  }
+}
+
 module.exports = {
   getAllBookings,
   getApprovalQueue,
   getAwaitingPayment,
   getMyBookings,
   createBooking,
+  markArrived,
   approveBooking,
   rejectBooking,
   cancelBooking,

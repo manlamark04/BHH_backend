@@ -120,6 +120,12 @@ router.patch('/:id/status',
   validate, svc.updateBookingStatus
 );
 
+// PATCH /api/bookings/:id/arrive — Staff/Admin: Mark guest as arrived
+router.patch('/:id/arrive',
+  authenticate, requireRole('staff', 'admin'),
+  svc.markArrived
+);
+
 // POST /api/bookings/process-no-shows — Staff/Admin: Run midnight cutoff sweep on demand
 router.post('/process-no-shows',
   authenticate, requireRole('staff', 'admin'),
