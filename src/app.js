@@ -18,7 +18,6 @@ const auditRoutes       = require('./routes/audit.routes');
 const notificationRoutes = require('./routes/notifications.routes');
 const inquiryRoutes     = require('./routes/inquiries.routes');
 const reviewRoutes      = require('./routes/reviews.routes');
-const posRoutes         = require('./routes/pos.routes');
 const { errorHandler, notFoundHandler } = require('./middleware/errorHandler');
 
 const app = express();
@@ -51,7 +50,6 @@ app.use('/api/audit',         auditRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/inquiries',     inquiryRoutes);
 app.use('/api/reviews',       reviewRoutes);
-app.use('/api/pos',           posRoutes);
 
 
 const pool = require('./config/db');
