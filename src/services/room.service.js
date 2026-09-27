@@ -40,9 +40,14 @@ async function getRooms(req, res) {
           WHERE p.notes IS NULL OR p.notes NOT LIKE '%[REFUNDED%'
           GROUP BY bill.booking_id
         ) paid_tbl ON paid_tbl.booking_id = b.id
+        LEFT JOIN (
+          SELECT booking_id, total_amount
+          FROM bills
+          WHERE id IN (SELECT MIN(id) FROM bills GROUP BY booking_id)
+        ) bill_tbl ON bill_tbl.booking_id = b.id
         JOIN rooms rm ON rm.id = b.room_id
         WHERE (b.status = 'checked_in' OR b.status = 'confirmed')
-           AND COALESCE(paid_tbl.total_paid, 0) >= (
+           AND COALESCE(paid_tbl.total_paid, 0) >= COALESCE(bill_tbl.total_amount,
              CASE
                WHEN b.booking_type = 'short_time' THEN ROUND((rm.rate_per_night / 24) * 2.0 * b.duration_hours, 2)
                ELSE (GREATEST(1, DATEDIFF(b.check_out, b.check_in)) * rm.rate_per_night)

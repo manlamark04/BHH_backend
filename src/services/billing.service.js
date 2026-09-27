@@ -97,6 +97,8 @@ async function getAllBills(req, res) {
         b.cancellation_fee,
         b.receipt_number,
         b.issued_by,
+        b.discount_amount,
+        b.promo_code,
         b.license_type AS bill_license_type,
         b.passport_number AS bill_passport_number,
         b.country_of_issuance AS bill_country_of_issuance,
@@ -462,6 +464,8 @@ async function getMyBills(req, res) {
         b.receipt_number,
         b.status,
         b.issued_at,
+        b.discount_amount,
+        b.promo_code,
         b.license_type AS bill_license_type,
         b.passport_number AS bill_passport_number,
         b.country_of_issuance AS bill_country_of_issuance,
@@ -1025,6 +1029,8 @@ async function recordPayment(req, res) {
         notes: notes || undefined,
         staff_name: staffName,
         paid_at: new Date().toISOString(),
+        discount_amount: bill.discount_amount,
+        promo_code: bill.promo_code
       }
     });
   } catch (err) {

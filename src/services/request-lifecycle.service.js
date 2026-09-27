@@ -1,4 +1,5 @@
 const pool = require('../config/db');
+const { sendEmail } = require('./email.service');
 
 const MIN_DEPOSIT_PERCENT = parseFloat(process.env.MIN_DEPOSIT_PERCENT || '100');
 const PENDING_PAYMENT_TIMEOUT_HOURS = parseInt(process.env.PENDING_PAYMENT_TIMEOUT_HOURS || '24', 10);
@@ -185,6 +186,21 @@ async function handlePaymentReceived(entityType, entityId, paymentInfo = {}) {
       reason: `Payment verified (₱${gate.totalPaid.toLocaleString()} of ₱${gate.totalPrice.toLocaleString()}). Automatically ${entityType === 'activity_rental' ? 'started match and activated court session' : 'checked in and confirmed'} upon payment.`,
       metadata: { totalPaid: gate.totalPaid, depositRequired: gate.depositRequired, payment: gate.latestPayment },
     });
+
+    if (gate.customerId) {
+      const [userRows] = await pool.query('SELECT full_name, email FROM users WHERE id = ?', [gate.customerId]);
+      const user = userRows[0];
+      if (user && user.email) {
+        let entityName = entityType === 'booking' ? 'room booking' : (entityType === 'motor_rental' ? 'motorcycle rental' : 'pickleball court session');
+        sendEmail(
+          user.email,
+          'Reservation Confirmed - Cambacay Breeze Inn',
+          `<h1>Reservation Confirmed</h1>
+           <p>Hi ${user.full_name},</p>
+           <p>Your payment of ₱${gate.totalPaid.toLocaleString()} has been received and your ${entityName} is now confirmed. Thank you!</p>`
+        );
+      }
+    }
 
     return { transitioned: true, newStatus: targetStatus };
   }
@@ -471,6 +487,22 @@ async function rejectRequest(entityType, entityId, staffUser, reason, notes = ''
     metadata: { refundId, amountToRefund: gate.totalPaid },
   });
 
+  if (gate.customerId) {
+    const [userRows] = await pool.query('SELECT full_name, email FROM users WHERE id = ?', [gate.customerId]);
+    const user = userRows[0];
+    if (user && user.email) {
+      let entityName = entityType === 'booking' ? 'room booking' : (entityType === 'motor_rental' ? 'motorcycle rental' : 'pickleball court session');
+      sendEmail(
+        user.email,
+        'Reservation Update - Cambacay Breeze Inn',
+        `<h1>Reservation Rejected</h1>
+         <p>Hi ${user.full_name},</p>
+         <p>Unfortunately, your ${entityName} reservation has been rejected by our staff.</p>
+         <p>Reason: ${fullReason}</p>`
+      );
+    }
+  }
+
   return {
     success: true,
     status: targetStatus,
@@ -546,6 +578,22 @@ async function cancelRequest(entityType, entityId, user, reason = 'Cancelled by 
       totalPaid: gate.totalPaid,
     },
   });
+
+  if (gate.customerId) {
+    const [userRows] = await pool.query('SELECT full_name, email FROM users WHERE id = ?', [gate.customerId]);
+    const user = userRows[0];
+    if (user && user.email) {
+      let entityName = entityType === 'booking' ? 'room booking' : (entityType === 'motor_rental' ? 'motorcycle rental' : 'pickleball court session');
+      sendEmail(
+        user.email,
+        'Reservation Cancelled - Cambacay Breeze Inn',
+        `<h1>Reservation Cancelled</h1>
+         <p>Hi ${user.full_name},</p>
+         <p>Your ${entityName} reservation has been cancelled.</p>
+         <p>Reason: ${reason}</p>`
+      );
+    }
+  }
 
   return { success: true, status: targetStatus, cancellation_fee: fee, message: 'Request cancelled.' };
 }

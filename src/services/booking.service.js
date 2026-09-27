@@ -57,24 +57,28 @@ async function getAllBookings(req, res) {
           ELSE GREATEST(1, DATEDIFF(b.check_out, b.check_in))
         END AS nights,
         r.capacity AS num_guests,
-        CASE
-          WHEN b.booking_type = 'short_time' THEN ROUND((r.rate_per_night / 24) * ${SHORT_TIME_MULTIPLIER} * b.duration_hours, 2)
-          ELSE (GREATEST(1, DATEDIFF(b.check_out, b.check_in)) * r.rate_per_night)
-        END AS total_price,
-        COALESCE(paid_tbl.total_paid, 0) AS amount_paid,
-        GREATEST(0,
+        COALESCE(bill_tbl.total_amount,
           CASE
             WHEN b.booking_type = 'short_time' THEN ROUND((r.rate_per_night / 24) * ${SHORT_TIME_MULTIPLIER} * b.duration_hours, 2)
             ELSE (GREATEST(1, DATEDIFF(b.check_out, b.check_in)) * r.rate_per_night)
-          END - COALESCE(paid_tbl.total_paid, 0)
-        ) AS remaining_balance,
-        CASE
-          WHEN COALESCE(paid_tbl.total_paid, 0) >= (
+          END
+        ) AS total_price,
+        COALESCE(paid_tbl.total_paid, 0) AS amount_paid,
+        GREATEST(0,
+          COALESCE(bill_tbl.total_amount,
             CASE
               WHEN b.booking_type = 'short_time' THEN ROUND((r.rate_per_night / 24) * ${SHORT_TIME_MULTIPLIER} * b.duration_hours, 2)
               ELSE (GREATEST(1, DATEDIFF(b.check_out, b.check_in)) * r.rate_per_night)
             END
-          ) AND (
+          ) - COALESCE(paid_tbl.total_paid, 0)
+        ) AS remaining_balance,
+        CASE
+          WHEN COALESCE(paid_tbl.total_paid, 0) >= COALESCE(bill_tbl.total_amount,
+            CASE
+              WHEN b.booking_type = 'short_time' THEN ROUND((r.rate_per_night / 24) * ${SHORT_TIME_MULTIPLIER} * b.duration_hours, 2)
+              ELSE (GREATEST(1, DATEDIFF(b.check_out, b.check_in)) * r.rate_per_night)
+            END
+          ) AND COALESCE(bill_tbl.total_amount,
             CASE
               WHEN b.booking_type = 'short_time' THEN ROUND((r.rate_per_night / 24) * ${SHORT_TIME_MULTIPLIER} * b.duration_hours, 2)
               ELSE (GREATEST(1, DATEDIFF(b.check_out, b.check_in)) * r.rate_per_night)
@@ -98,7 +102,9 @@ async function getAllBookings(req, res) {
         latest_pay.method AS latest_payment_method,
         latest_pay.id AS latest_payment_id,
         latest_pay.paid_at AS latest_payment_date,
-        latest_pay.notes AS latest_payment_notes
+        latest_pay.notes AS latest_payment_notes,
+        bill_tbl.discount_amount,
+        bill_tbl.promo_code
       FROM bookings b
       JOIN users u ON u.id = b.customer_id
       JOIN rooms r ON r.id = b.room_id
@@ -112,6 +118,11 @@ async function getAllBookings(req, res) {
         WHERE p.notes IS NULL OR p.notes NOT LIKE '%[REFUNDED%'
         GROUP BY bill.booking_id
       ) paid_tbl ON paid_tbl.booking_id = b.id
+      LEFT JOIN (
+        SELECT booking_id, total_amount, discount_amount, promo_code
+        FROM bills
+        WHERE id IN (SELECT MIN(id) FROM bills GROUP BY booking_id)
+      ) bill_tbl ON bill_tbl.booking_id = b.id
       LEFT JOIN (
         SELECT p1.bill_id, p1.id, p1.method, p1.paid_at, p1.notes, b1.booking_id
         FROM payments p1
@@ -208,18 +219,20 @@ async function getMyBookings(req, res) {
         END AS total_price,
         COALESCE(paid_tbl.total_paid, 0) AS amount_paid,
         GREATEST(0,
-          CASE
-            WHEN b.booking_type = 'short_time' THEN ROUND((r.rate_per_night / 24) * ${SHORT_TIME_MULTIPLIER} * b.duration_hours, 2)
-            ELSE (GREATEST(1, DATEDIFF(b.check_out, b.check_in)) * r.rate_per_night)
-          END - COALESCE(paid_tbl.total_paid, 0)
-        ) AS remaining_balance,
-        CASE
-          WHEN COALESCE(paid_tbl.total_paid, 0) >= (
+          COALESCE(bill_tbl.total_amount,
             CASE
               WHEN b.booking_type = 'short_time' THEN ROUND((r.rate_per_night / 24) * ${SHORT_TIME_MULTIPLIER} * b.duration_hours, 2)
               ELSE (GREATEST(1, DATEDIFF(b.check_out, b.check_in)) * r.rate_per_night)
             END
-          ) AND (
+          ) - COALESCE(paid_tbl.total_paid, 0)
+        ) AS remaining_balance,
+        CASE
+          WHEN COALESCE(paid_tbl.total_paid, 0) >= COALESCE(bill_tbl.total_amount,
+            CASE
+              WHEN b.booking_type = 'short_time' THEN ROUND((r.rate_per_night / 24) * ${SHORT_TIME_MULTIPLIER} * b.duration_hours, 2)
+              ELSE (GREATEST(1, DATEDIFF(b.check_out, b.check_in)) * r.rate_per_night)
+            END
+          ) AND COALESCE(bill_tbl.total_amount,
             CASE
               WHEN b.booking_type = 'short_time' THEN ROUND((r.rate_per_night / 24) * ${SHORT_TIME_MULTIPLIER} * b.duration_hours, 2)
               ELSE (GREATEST(1, DATEDIFF(b.check_out, b.check_in)) * r.rate_per_night)
@@ -249,6 +262,11 @@ async function getMyBookings(req, res) {
         GROUP BY bill.booking_id
       ) paid_tbl ON paid_tbl.booking_id = b.id
       LEFT JOIN (
+        SELECT booking_id, total_amount, discount_amount, promo_code
+        FROM bills
+        WHERE id IN (SELECT MIN(id) FROM bills GROUP BY booking_id)
+      ) bill_tbl ON bill_tbl.booking_id = b.id
+      LEFT JOIN (
         SELECT entity_id, status, amount
         FROM refunds
         WHERE entity_type = 'booking'
@@ -268,7 +286,7 @@ async function getMyBookings(req, res) {
 async function createBooking(req, res) {
   try {
     const { room_id, check_in, check_out, notes, customer_id, initial_payment, payment_method,
-            booking_type, check_in_time, duration_hours } = req.body;
+            booking_type, check_in_time, duration_hours, promo_code } = req.body;
     const targetCustomerId = (req.user.role === 'staff' || req.user.role === 'admin') && customer_id
       ? parseInt(customer_id)
       : req.user.id;
@@ -427,18 +445,30 @@ async function createBooking(req, res) {
       }
 
       // ── Price calculation ──
-      let nights, totalPrice, lineDesc;
+      let nights, totalPrice, lineDesc, basePrice;
       if (isShortTime) {
         const dur = parseInt(duration_hours, 10);
         const hourlyRate = (Number(room.rate_per_night) / 24) * SHORT_TIME_MULTIPLIER;
         nights = dur;
-        totalPrice = Math.round(hourlyRate * dur * 100) / 100;
+        basePrice = hourlyRate * dur;
         lineDesc = `Short Time - ${room.room_type} Room (${room.room_number}) - ${dur} Hour(s)`;
       } else {
         nights = Math.max(1, Math.ceil((new Date(check_out) - new Date(check_in)) / (1000 * 60 * 60 * 24)));
-        totalPrice = Number(room.rate_per_night) * nights;
+        basePrice = Number(room.rate_per_night) * nights;
         lineDesc = `${room.room_type} Room (${room.room_number}) - ${nights} Night(s)`;
       }
+      
+      let discountAmount = 0;
+      let finalPromoCode = null;
+      if (promo_code) {
+        const [promoRows] = await conn.query("SELECT discount_percentage, valid_until FROM promocodes WHERE code = ? AND status = 'active'", [promo_code]);
+        if (promoRows.length > 0 && new Date(promoRows[0].valid_until) >= new Date()) {
+          const discountPct = Number(promoRows[0].discount_percentage) || 0;
+          discountAmount = basePrice * (discountPct / 100);
+          finalPromoCode = promo_code;
+        }
+      }
+      totalPrice = Math.round((basePrice - discountAmount) * 100) / 100;
 
       // Set payment deadline (e.g. NOW + 24 hours)
       const paymentDeadline = requestLifecycle.getPaymentDeadline();
@@ -466,8 +496,8 @@ async function createBooking(req, res) {
       const initialPayAmount = initial_payment ? Number(initial_payment) : 0;
 
       const [billRes] = await conn.query(`
-        INSERT INTO bills (bill_number, customer_id, booking_id, total_amount, paid_amount, status, issued_by, issued_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, NOW())
+        INSERT INTO bills (bill_number, customer_id, booking_id, total_amount, paid_amount, status, issued_by, issued_at, discount_amount, promo_code)
+        VALUES (?, ?, ?, ?, ?, ?, ?, NOW(), ?, ?)
       `, [
         billNumber,
         targetCustomerId,
@@ -476,6 +506,8 @@ async function createBooking(req, res) {
         initialPayAmount,
         initialPayAmount >= totalPrice ? 'paid' : (initialPayAmount > 0 ? 'partially_paid' : 'unpaid'),
         req.user.id || targetCustomerId,
+        discountAmount,
+        finalPromoCode
       ]);
 
       const billId = billRes.insertId;
