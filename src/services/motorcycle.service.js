@@ -607,7 +607,7 @@ async function createMotorRental(req, res) {
       `SELECT id, rental_id, start_datetime, expected_return_datetime 
        FROM motor_rentals 
        WHERE motor_id = ? 
-         AND status IN ('ACTIVE', 'RESERVED', 'OVERDUE')
+         AND status IN ('ACTIVE', 'RESERVED', 'OVERDUE', 'PENDING_PAYMENT')
          AND (
            (start_datetime <= ? AND expected_return_datetime >= ?) OR
            (start_datetime <= ? AND expected_return_datetime >= ?) OR
@@ -647,7 +647,7 @@ async function createMotorRental(req, res) {
     const isCustomer = req.user.role === 'customer';
     const requestLifecycle = require('./request-lifecycle.service');
     const paymentDeadline = isCustomer ? requestLifecycle.getPaymentDeadline() : null;
-    let initialStatus = isCustomer ? 'PENDING_PAYMENT' : 'ACTIVE';
+    let initialStatus = 'PENDING_PAYMENT';
 
     // Insert into motor_rentals
     const [rentalResult] = await conn.query(
@@ -693,7 +693,7 @@ async function createMotorRental(req, res) {
     // Generate bill for this motor rental
     const currentYear = new Date().getFullYear();
     const billNumber = `BILL-${rentalId}`;
-    const initialPayAmount = req.body.initial_payment ? Number(req.body.initial_payment) : (isCustomer ? 0 : totalAmount);
+    const initialPayAmount = req.body.initial_payment ? Number(req.body.initial_payment) : 0;
 
     const [billRes] = await conn.query(`
       INSERT INTO bills (
@@ -742,7 +742,7 @@ async function createMotorRental(req, res) {
     // Update motorcycle status:
     // When a customer requests a rental, the motorcycle remains AVAILABLE until payment is recorded.
     // On immediate staff walk-in / dispatch or full payment, it is marked RENTED.
-    if (!isCustomer || initialPayAmount >= totalAmount) {
+    if (initialPayAmount >= totalAmount) {
       await conn.query('UPDATE motorcycles SET status = ? WHERE id = ?', ['RENTED', motor_id]);
     }
 

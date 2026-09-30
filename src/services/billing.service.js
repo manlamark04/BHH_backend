@@ -575,6 +575,7 @@ async function getMyBills(req, res) {
       const isCancelled = isCancelledBooking || isCancelledActivity || isCancelledMotor || isCancelledBill;
 
       const isPendingApproval = false;
+      const isNoShow = String(b.booking_status || '').toLowerCase() === 'no_show' || String(b.status || '').toLowerCase() === 'no_show' || Number(b.booking_no_show_fee || 0) > 0 || Number(b.no_show_fee || 0) > 0;
       const noShowFee = Number(b.booking_no_show_fee ?? b.no_show_fee ?? b.cancellation_fee ?? 0);
       const cancellationFee = Number(b.cancellation_fee ?? b.booking_cancellation_fee ?? 0);
       let remainingBalance = 0;
