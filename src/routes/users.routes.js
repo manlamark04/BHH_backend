@@ -5,6 +5,7 @@ const svc      = require('../services/user.service');
 const { authenticate }  = require('../middleware/auth');
 const { requireRole }   = require('../middleware/roles');
 const { validate }      = require('../middleware/validate');
+const upload            = require('../middleware/upload');
 
 // ─── WALK-IN & CUSTOMER MANAGEMENT ────────────────────────────
 
@@ -62,6 +63,10 @@ router.post('/customers/:id/approve', authenticate, requireRole('admin'), svc.ap
 router.post('/customers/:id/reject', authenticate, requireRole('admin'), svc.rejectCustomer);
 router.post('/customers/:id/suspend', authenticate, requireRole('admin'), svc.suspendCustomer);
 router.post('/customers/:id/reactivate', authenticate, requireRole('admin'), svc.reactivateCustomer);
+
+// ─── SELF-SERVICE PROFILE PHOTO MANAGEMENT ────────────────────
+router.post('/profile-photo', authenticate, upload.single('photo'), svc.uploadProfilePhoto);
+router.delete('/profile-photo', authenticate, svc.removeProfilePhoto);
 
 // ─── GENERAL USER MANAGEMENT (Admin) ──────────────────────────
 

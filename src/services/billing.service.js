@@ -97,6 +97,8 @@ async function getAllBills(req, res) {
         b.cancellation_fee,
         b.receipt_number,
         b.issued_by,
+        b.discount_amount,
+        b.promo_code,
         b.license_type AS bill_license_type,
         b.passport_number AS bill_passport_number,
         b.country_of_issuance AS bill_country_of_issuance,
@@ -121,6 +123,7 @@ async function getAllBills(req, res) {
         u.phone AS customer_phone,
         su.full_name AS staff_name,
         bk.status AS booking_status,
+        bk.is_arrived AS is_arrived,
         bk.room_id,
         bk.booking_type,
         bk.check_in_time,
@@ -218,12 +221,7 @@ async function getAllBills(req, res) {
       const isNoShow = String(b.booking_status || '').toLowerCase() === 'no_show' || String(b.status || '').toLowerCase() === 'no_show' || Number(b.booking_no_show_fee || 0) > 0 || Number(b.no_show_fee || 0) > 0;
       const noShowFee = Number(b.booking_no_show_fee ?? b.no_show_fee ?? b.cancellation_fee ?? 0);
 
-      // Pending Approval check: linked reservation is still awaiting staff approval (Rooms, Activities, Motorcycles)
-      const isBookingPendingApproval = Boolean(b.booking_id && ['pending_approval', 'pending', 'requested'].includes(String(b.booking_status || '').toLowerCase()));
-      const isActivityPendingApproval = Boolean(b.activity_rental_id && ['pending_approval', 'pending', 'requested'].includes(String(b.activity_status || '').toLowerCase()));
-      const isMotorPendingApproval = Boolean(b.motor_rental_id && ['pending_approval', 'pending', 'requested'].includes(String(b.motor_status || '').toLowerCase()));
-      const isPendingApproval = !isCancelled && !isNoShow && (isBookingPendingApproval || isActivityPendingApproval || isMotorPendingApproval);
-
+      const isPendingApproval = false;
       const cancellationFee = Number(b.cancellation_fee ?? b.booking_cancellation_fee ?? 0);
       let remainingBalance = 0;
       let status = String(b.status || '').toUpperCase();
@@ -265,10 +263,7 @@ async function getAllBills(req, res) {
       } else if (billPayments.some((p) => p.is_refunded) && computedPaid === 0) {
         status = 'REFUNDED';
         remainingBalance = 0;
-      } else if (isPendingApproval) {
-        // Enforce "approve first, then bill": when reservation is still pending approval, invoice status is PENDING_APPROVAL
-        status = 'PENDING_APPROVAL';
-        remainingBalance = Math.max(0, totalAmount - computedPaid);
+
       } else {
         status = 'PENDING';
         remainingBalance = Math.max(0, totalAmount - computedPaid);
@@ -367,6 +362,7 @@ async function getAllBills(req, res) {
         booking_id: b.booking_id,
         booking_ref: bookingRef,
         booking_status: b.booking_status,
+        is_arrived: b.is_arrived,
         booking_type: b.booking_type,
         check_in_time: b.check_in_time,
         duration_hours: b.duration_hours,
@@ -419,7 +415,13 @@ async function getAllBills(req, res) {
     });
 
     // Optional status or search filter
-    let results = formattedBills;
+    let results = formattedBills.filter((b) => {
+      // Hide Confirmed/Reserved reservations if they haven't explicitly arrived yet
+      const isConfirmedNotArrived = ['requested', 'confirmed', 'reserved', 'pending', 'pending_payment'].includes(String(b.booking_status || '').toLowerCase()) && Number(b.is_arrived || 0) === 0;
+      if (isConfirmedNotArrived) return false;
+      return true;
+    });
+
     if (status && status !== 'All') {
       results = results.filter((b) => b.status.toLowerCase() === status.toLowerCase());
     }
@@ -462,6 +464,8 @@ async function getMyBills(req, res) {
         b.receipt_number,
         b.status,
         b.issued_at,
+        b.discount_amount,
+        b.promo_code,
         b.license_type AS bill_license_type,
         b.passport_number AS bill_passport_number,
         b.country_of_issuance AS bill_country_of_issuance,
@@ -570,12 +574,8 @@ async function getMyBills(req, res) {
       const isCancelledBill = ['cancelled', 'void'].includes(String(b.status || '').toLowerCase());
       const isCancelled = isCancelledBooking || isCancelledActivity || isCancelledMotor || isCancelledBill;
 
-      // Pending Approval check: linked reservation is still awaiting staff approval
-      const isBookingPendingApproval = Boolean(b.booking_id && ['pending_approval', 'pending', 'requested'].includes(String(b.booking_status || '').toLowerCase()));
-      const isActivityPendingApproval = Boolean(b.activity_rental_id && ['pending_approval', 'pending', 'requested'].includes(String(b.activity_status || '').toLowerCase()));
-      const isMotorPendingApproval = Boolean(b.motor_rental_id && ['pending_approval', 'pending', 'requested'].includes(String(b.motor_status || '').toLowerCase()));
-      const isPendingApproval = !isCancelled && !isNoShow && (isBookingPendingApproval || isActivityPendingApproval || isMotorPendingApproval);
-
+      const isPendingApproval = false;
+      const isNoShow = String(b.booking_status || '').toLowerCase() === 'no_show' || String(b.status || '').toLowerCase() === 'no_show' || Number(b.booking_no_show_fee || 0) > 0 || Number(b.no_show_fee || 0) > 0;
       const noShowFee = Number(b.booking_no_show_fee ?? b.no_show_fee ?? b.cancellation_fee ?? 0);
       const cancellationFee = Number(b.cancellation_fee ?? b.booking_cancellation_fee ?? 0);
       let remainingBalance = 0;
@@ -618,9 +618,7 @@ async function getMyBills(req, res) {
       } else if (billPayments.some((p) => p.is_refunded) && computedPaid === 0) {
         status = 'REFUNDED';
         remainingBalance = 0;
-      } else if (isPendingApproval) {
-        status = 'PENDING_APPROVAL';
-        remainingBalance = Math.max(0, totalAmount - computedPaid);
+
       } else {
         status = 'UNPAID';
         remainingBalance = Math.max(0, totalAmount - computedPaid);
@@ -863,23 +861,7 @@ async function recordPayment(req, res) {
     if (bRows.length === 0) return res.status(404).json({ message: 'Bill not found.' });
     const bill = bRows[0];
 
-    // Enforce "approve first, then bill": block payment if room or motorcycle reservation is still in pending approval
-    if (bill.booking_id) {
-      const [bkgRows] = await pool.query('SELECT status FROM bookings WHERE id = ?', [bill.booking_id]);
-      if (bkgRows.length > 0 && ['pending_approval', 'pending', 'requested'].includes(String(bkgRows[0].status || '').toLowerCase())) {
-        return res.status(400).json({
-          message: 'Cannot collect payment for a room reservation that is still pending approval. Please approve the reservation in Pending Approvals first.'
-        });
-      }
-    }
-    if (bill.motor_rental_id) {
-      const [mrRows] = await pool.query('SELECT status FROM motor_rentals WHERE id = ?', [bill.motor_rental_id]);
-      if (mrRows.length > 0 && ['pending_approval', 'pending', 'requested'].includes(String(mrRows[0].status || '').toLowerCase())) {
-        return res.status(400).json({
-          message: 'Cannot collect payment for a motorcycle rental that is still pending approval. Please approve the reservation first.'
-        });
-      }
-    }
+
 
     // Hard requirement: Motor Rental invoices must have driver's license verified in-person before collecting payment
     const isMotorBill = Boolean(
@@ -1048,6 +1030,8 @@ async function recordPayment(req, res) {
         notes: notes || undefined,
         staff_name: staffName,
         paid_at: new Date().toISOString(),
+        discount_amount: bill.discount_amount,
+        promo_code: bill.promo_code
       }
     });
   } catch (err) {

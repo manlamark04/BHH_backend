@@ -1,5 +1,6 @@
 const pool = require('../config/db');
 const db   = require('../db/procedures');
+const { notifyStaffAndAdmin, notifyUser } = require('./notification.emitter');
 const requestLifecycle = require('./request-lifecycle.service');
 
 // ── Short-Time Booking Configuration ──────────────────────────
@@ -8,9 +9,26 @@ const requestLifecycle = require('./request-lifecycle.service');
 const SHORT_TIME_MULTIPLIER = 2.0;
 const SHORT_TIME_MAX_HOURS  = 5;
 
+let bookingColumnsChecked = false;
+async function ensureBookingColumns() {
+  if (bookingColumnsChecked) return;
+  try {
+    const [rows] = await pool.query(
+      `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'bookings' AND COLUMN_NAME = 'is_arrived'`
+    );
+    if (rows.length === 0) {
+      await pool.query(`ALTER TABLE \`bookings\` ADD COLUMN \`is_arrived\` TINYINT(1) NOT NULL DEFAULT 0`);
+    }
+    bookingColumnsChecked = true;
+  } catch (err) {
+    console.error('Failed to ensure booking columns:', err);
+  }
+}
+
 /** GET /api/bookings — Staff/Admin: all bookings with full customer, room, and payment details */
 async function getAllBookings(req, res) {
   try {
+    await ensureBookingColumns();
     await requestLifecycle.syncPaidRequestsToConfirmed();
     const { status, search } = req.query;
 
@@ -23,6 +41,7 @@ async function getAllBookings(req, res) {
         u.unique_id AS customer_code,
         u.email AS customer_email,
         u.phone AS customer_phone,
+        b.is_arrived,
         b.room_id,
         r.room_number,
         r.room_type,
@@ -38,24 +57,28 @@ async function getAllBookings(req, res) {
           ELSE GREATEST(1, DATEDIFF(b.check_out, b.check_in))
         END AS nights,
         r.capacity AS num_guests,
-        CASE
-          WHEN b.booking_type = 'short_time' THEN ROUND((r.rate_per_night / 24) * ${SHORT_TIME_MULTIPLIER} * b.duration_hours, 2)
-          ELSE (GREATEST(1, DATEDIFF(b.check_out, b.check_in)) * r.rate_per_night)
-        END AS total_price,
-        COALESCE(paid_tbl.total_paid, 0) AS amount_paid,
-        GREATEST(0,
+        COALESCE(bill_tbl.total_amount,
           CASE
             WHEN b.booking_type = 'short_time' THEN ROUND((r.rate_per_night / 24) * ${SHORT_TIME_MULTIPLIER} * b.duration_hours, 2)
             ELSE (GREATEST(1, DATEDIFF(b.check_out, b.check_in)) * r.rate_per_night)
-          END - COALESCE(paid_tbl.total_paid, 0)
-        ) AS remaining_balance,
-        CASE
-          WHEN COALESCE(paid_tbl.total_paid, 0) >= (
+          END
+        ) AS total_price,
+        COALESCE(paid_tbl.total_paid, 0) AS amount_paid,
+        GREATEST(0,
+          COALESCE(bill_tbl.total_amount,
             CASE
               WHEN b.booking_type = 'short_time' THEN ROUND((r.rate_per_night / 24) * ${SHORT_TIME_MULTIPLIER} * b.duration_hours, 2)
               ELSE (GREATEST(1, DATEDIFF(b.check_out, b.check_in)) * r.rate_per_night)
             END
-          ) AND (
+          ) - COALESCE(paid_tbl.total_paid, 0)
+        ) AS remaining_balance,
+        CASE
+          WHEN COALESCE(paid_tbl.total_paid, 0) >= COALESCE(bill_tbl.total_amount,
+            CASE
+              WHEN b.booking_type = 'short_time' THEN ROUND((r.rate_per_night / 24) * ${SHORT_TIME_MULTIPLIER} * b.duration_hours, 2)
+              ELSE (GREATEST(1, DATEDIFF(b.check_out, b.check_in)) * r.rate_per_night)
+            END
+          ) AND COALESCE(bill_tbl.total_amount,
             CASE
               WHEN b.booking_type = 'short_time' THEN ROUND((r.rate_per_night / 24) * ${SHORT_TIME_MULTIPLIER} * b.duration_hours, 2)
               ELSE (GREATEST(1, DATEDIFF(b.check_out, b.check_in)) * r.rate_per_night)
@@ -79,7 +102,9 @@ async function getAllBookings(req, res) {
         latest_pay.method AS latest_payment_method,
         latest_pay.id AS latest_payment_id,
         latest_pay.paid_at AS latest_payment_date,
-        latest_pay.notes AS latest_payment_notes
+        latest_pay.notes AS latest_payment_notes,
+        bill_tbl.discount_amount,
+        bill_tbl.promo_code
       FROM bookings b
       JOIN users u ON u.id = b.customer_id
       JOIN rooms r ON r.id = b.room_id
@@ -93,6 +118,11 @@ async function getAllBookings(req, res) {
         WHERE p.notes IS NULL OR p.notes NOT LIKE '%[REFUNDED%'
         GROUP BY bill.booking_id
       ) paid_tbl ON paid_tbl.booking_id = b.id
+      LEFT JOIN (
+        SELECT booking_id, total_amount, discount_amount, promo_code
+        FROM bills
+        WHERE id IN (SELECT MIN(id) FROM bills GROUP BY booking_id)
+      ) bill_tbl ON bill_tbl.booking_id = b.id
       LEFT JOIN (
         SELECT p1.bill_id, p1.id, p1.method, p1.paid_at, p1.notes, b1.booking_id
         FROM payments p1
@@ -137,11 +167,11 @@ async function getAllBookings(req, res) {
   }
 }
 
-/** GET /api/bookings/approval-queue — Staff/Admin: items in pending_approval */
+/** GET /api/bookings/approval-queue — DEPRECATED: Staff/Admin items in pending_approval */
 async function getApprovalQueue(req, res) {
   try {
-    req.query.status = 'pending_approval';
-    return await getAllBookings(req, res);
+    // Returns empty array as approvals are removed
+    res.json([]);
   } catch (err) {
     console.error('getApprovalQueue error:', err);
     res.status(500).json({ message: err.message });
@@ -189,18 +219,20 @@ async function getMyBookings(req, res) {
         END AS total_price,
         COALESCE(paid_tbl.total_paid, 0) AS amount_paid,
         GREATEST(0,
-          CASE
-            WHEN b.booking_type = 'short_time' THEN ROUND((r.rate_per_night / 24) * ${SHORT_TIME_MULTIPLIER} * b.duration_hours, 2)
-            ELSE (GREATEST(1, DATEDIFF(b.check_out, b.check_in)) * r.rate_per_night)
-          END - COALESCE(paid_tbl.total_paid, 0)
-        ) AS remaining_balance,
-        CASE
-          WHEN COALESCE(paid_tbl.total_paid, 0) >= (
+          COALESCE(bill_tbl.total_amount,
             CASE
               WHEN b.booking_type = 'short_time' THEN ROUND((r.rate_per_night / 24) * ${SHORT_TIME_MULTIPLIER} * b.duration_hours, 2)
               ELSE (GREATEST(1, DATEDIFF(b.check_out, b.check_in)) * r.rate_per_night)
             END
-          ) AND (
+          ) - COALESCE(paid_tbl.total_paid, 0)
+        ) AS remaining_balance,
+        CASE
+          WHEN COALESCE(paid_tbl.total_paid, 0) >= COALESCE(bill_tbl.total_amount,
+            CASE
+              WHEN b.booking_type = 'short_time' THEN ROUND((r.rate_per_night / 24) * ${SHORT_TIME_MULTIPLIER} * b.duration_hours, 2)
+              ELSE (GREATEST(1, DATEDIFF(b.check_out, b.check_in)) * r.rate_per_night)
+            END
+          ) AND COALESCE(bill_tbl.total_amount,
             CASE
               WHEN b.booking_type = 'short_time' THEN ROUND((r.rate_per_night / 24) * ${SHORT_TIME_MULTIPLIER} * b.duration_hours, 2)
               ELSE (GREATEST(1, DATEDIFF(b.check_out, b.check_in)) * r.rate_per_night)
@@ -230,6 +262,11 @@ async function getMyBookings(req, res) {
         GROUP BY bill.booking_id
       ) paid_tbl ON paid_tbl.booking_id = b.id
       LEFT JOIN (
+        SELECT booking_id, total_amount, discount_amount, promo_code
+        FROM bills
+        WHERE id IN (SELECT MIN(id) FROM bills GROUP BY booking_id)
+      ) bill_tbl ON bill_tbl.booking_id = b.id
+      LEFT JOIN (
         SELECT entity_id, status, amount
         FROM refunds
         WHERE entity_type = 'booking'
@@ -249,7 +286,7 @@ async function getMyBookings(req, res) {
 async function createBooking(req, res) {
   try {
     const { room_id, check_in, check_out, notes, customer_id, initial_payment, payment_method,
-            booking_type, check_in_time, duration_hours } = req.body;
+            booking_type, check_in_time, duration_hours, promo_code } = req.body;
     const targetCustomerId = (req.user.role === 'staff' || req.user.role === 'admin') && customer_id
       ? parseInt(customer_id)
       : req.user.id;
@@ -338,7 +375,7 @@ async function createBooking(req, res) {
     }
 
     // ── Enforce 1-Stay-at-a-Time Rule (Option B: Multiple rooms allowed for same stay) ──
-    // A guest who already has an in-progress reservation (pending_payment, pending_approval, confirmed, approved, active, checked_in)
+    // A guest who already has an in-progress reservation (pending_payment, confirmed, approved, active, checked_in)
     // can reserve multiple rooms for the same stay dates (family/group trip),
     // but cannot hold separate future or disconnected stays until their current stay is checked out, cancelled, or rejected.
     const [existingStays] = await pool.query(`
@@ -408,22 +445,34 @@ async function createBooking(req, res) {
       }
 
       // ── Price calculation ──
-      let nights, totalPrice, lineDesc;
+      let nights, totalPrice, lineDesc, basePrice;
       if (isShortTime) {
         const dur = parseInt(duration_hours, 10);
         const hourlyRate = (Number(room.rate_per_night) / 24) * SHORT_TIME_MULTIPLIER;
         nights = dur;
-        totalPrice = Math.round(hourlyRate * dur * 100) / 100;
+        basePrice = hourlyRate * dur;
         lineDesc = `Short Time - ${room.room_type} Room (${room.room_number}) - ${dur} Hour(s)`;
       } else {
         nights = Math.max(1, Math.ceil((new Date(check_out) - new Date(check_in)) / (1000 * 60 * 60 * 24)));
-        totalPrice = Number(room.rate_per_night) * nights;
+        basePrice = Number(room.rate_per_night) * nights;
         lineDesc = `${room.room_type} Room (${room.room_number}) - ${nights} Night(s)`;
       }
+      
+      let discountAmount = 0;
+      let finalPromoCode = null;
+      if (promo_code) {
+        const [promoRows] = await conn.query("SELECT discount_percentage, valid_until FROM promocodes WHERE code = ? AND status = 'active'", [promo_code]);
+        if (promoRows.length > 0 && new Date(promoRows[0].valid_until) >= new Date()) {
+          const discountPct = Number(promoRows[0].discount_percentage) || 0;
+          discountAmount = basePrice * (discountPct / 100);
+          finalPromoCode = promo_code;
+        }
+      }
+      totalPrice = Math.round((basePrice - discountAmount) * 100) / 100;
 
       // Set payment deadline (e.g. NOW + 24 hours)
       const paymentDeadline = requestLifecycle.getPaymentDeadline();
-      let initialStatus = 'pending_approval';
+      let initialStatus = 'pending_payment';
 
       // Insert booking
       const [result] = await conn.query(`
@@ -447,8 +496,8 @@ async function createBooking(req, res) {
       const initialPayAmount = initial_payment ? Number(initial_payment) : 0;
 
       const [billRes] = await conn.query(`
-        INSERT INTO bills (bill_number, customer_id, booking_id, total_amount, paid_amount, status, issued_by, issued_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, NOW())
+        INSERT INTO bills (bill_number, customer_id, booking_id, total_amount, paid_amount, status, issued_by, issued_at, discount_amount, promo_code)
+        VALUES (?, ?, ?, ?, ?, ?, ?, NOW(), ?, ?)
       `, [
         billNumber,
         targetCustomerId,
@@ -457,6 +506,8 @@ async function createBooking(req, res) {
         initialPayAmount,
         initialPayAmount >= totalPrice ? 'paid' : (initialPayAmount > 0 ? 'partially_paid' : 'unpaid'),
         req.user.id || targetCustomerId,
+        discountAmount,
+        finalPromoCode
       ]);
 
       const billId = billRes.insertId;
@@ -495,7 +546,7 @@ async function createBooking(req, res) {
       // Update room status:
       if (initialStatus === 'checked_in') {
         await conn.query("UPDATE rooms SET status = 'occupied', updated_at = NOW() WHERE id = ?", [room_id]);
-      } else if (initialStatus === 'confirmed') {
+      } else {
         await conn.query("UPDATE rooms SET status = 'reserved', updated_at = NOW() WHERE id = ?", [room_id]);
       }
 
@@ -576,35 +627,20 @@ async function cancelBooking(req, res) {
   }
 }
 
-/** POST /api/bookings/:id/no-show — Staff manual mark as no-show */
+/** POST /api/bookings/:id/no-show — Staff manual mark as no-show (no fee charged) */
 async function markBookingNoShow(req, res) {
   try {
     const bookingId = parseInt(req.params.id, 10);
-    const { custom_fee, reason } = req.body;
+    const { reason } = req.body;
     const noshowService = require('./noshow.service');
     const result = await noshowService.processBookingNoShow(bookingId, {
       staffUser: req.user,
       triggerType: 'manual_override',
-      customFee: custom_fee !== undefined ? custom_fee : null,
       reason: reason || 'Staff manually marked booking as No-Show',
     });
     res.json(result);
   } catch (err) {
     console.error('markBookingNoShow error:', err);
-    res.status(err.statusCode || 500).json({ message: err.message });
-  }
-}
-
-/** PATCH /api/bookings/:id/waive-no-show — Staff waive or adjust no-show fee */
-async function waiveBookingNoShowFee(req, res) {
-  try {
-    const bookingId = parseInt(req.params.id, 10);
-    const { reason, new_fee } = req.body;
-    const noshowService = require('./noshow.service');
-    const result = await noshowService.waiveNoShowFee(bookingId, req.user, reason, new_fee !== undefined ? new_fee : 0);
-    res.json(result);
-  } catch (err) {
-    console.error('waiveBookingNoShowFee error:', err);
     res.status(err.statusCode || 500).json({ message: err.message });
   }
 }
@@ -666,7 +702,7 @@ async function updateBookingStatus(req, res) {
     await pool.query('UPDATE bookings SET status = ?, updated_at = NOW() WHERE id = ?', [normStatus, bookingId]);
 
     // Synchronize room status
-    if (normStatus === 'confirmed' || normStatus === 'approved') {
+    if (['confirmed', 'approved', 'pending_payment', 'requested', 'pending'].includes(normStatus)) {
       await pool.query("UPDATE rooms SET status = 'reserved', updated_at = NOW() WHERE id = ?", [booking.room_id]);
     } else if (normStatus === 'checked_in') {
       await pool.query("UPDATE rooms SET status = 'occupied', updated_at = NOW() WHERE id = ?", [booking.room_id]);
@@ -827,7 +863,7 @@ async function recordBookingPayment(req, res) {
     const billStatus = totalPaid >= totalPrice ? 'paid' : (totalPaid > 0 ? 'partially_paid' : 'unpaid');
     await pool.query('UPDATE bills SET paid_amount = ?, status = ? WHERE id = ?', [totalPaid, billStatus, billId]);
 
-    // Trigger state machine advancement from pending_payment -> pending_approval
+    // Trigger state machine advancement from pending_payment -> confirmed
     const transitionResult = await requestLifecycle.handlePaymentReceived('booking', bookingId, {
       userId: req.user.id,
       userName: req.user.full_name || req.user.username,
@@ -1354,7 +1390,7 @@ async function updateRentalStatus(req, res) {
   try {
     const { status, remarks } = req.body;
     const rentalId = parseInt(req.params.id);
-    const validStatuses = ['pending_payment', 'pending_approval', 'confirmed', 'active', 'completed', 'cancelled', 'rejected'];
+    const validStatuses = ['pending_payment', 'confirmed', 'active', 'completed', 'cancelled', 'rejected'];
     const normStatus = status.toLowerCase().replace('-', '_');
 
     if (normStatus === 'confirmed') return await approveRental(req, res);
@@ -1596,17 +1632,30 @@ async function extendRental(req, res) {
   }
 }
 
+/** PATCH /api/bookings/:id/arrive */
+async function markArrived(req, res) {
+  try {
+    await ensureBookingColumns();
+    const bookingId = parseInt(req.params.id);
+    await pool.query('UPDATE bookings SET is_arrived = 1, updated_at = NOW() WHERE id = ?', [bookingId]);
+    res.json({ message: 'Guest marked as arrived.' });
+  } catch (err) {
+    console.error('markArrived error:', err);
+    res.status(500).json({ message: err.message });
+  }
+}
+
 module.exports = {
   getAllBookings,
   getApprovalQueue,
   getAwaitingPayment,
   getMyBookings,
   createBooking,
+  markArrived,
   approveBooking,
   rejectBooking,
   cancelBooking,
   markBookingNoShow,
-  waiveBookingNoShowFee,
   processNoShowsManual,
   getBookingAuditTrail,
   updateBookingStatus,

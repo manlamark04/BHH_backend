@@ -31,7 +31,9 @@
     "helmet": "^8.3.0",
     "jsonwebtoken": "^9.0.3",
     "morgan": "^1.11.0",
-    "multer": "^2.2.0",
-    "mysql2": "^3.11.0"
+    "multer": "^2.4.0",
+    "mysql2": "^3.11.0",
+    "nodemailer": "^10.0.10",
+    "socket.io": "^4.8.3"
   }
 }

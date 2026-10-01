@@ -12,9 +12,9 @@ router.get('/', svc.getCourts);
 // GET /api/courts/:id — Get single court
 router.get('/:id', svc.getCourtById);
 
-// POST /api/courts — Admin: Add new court entity
+// POST /api/courts — Staff/Admin: Add new court entity
 router.post('/',
-  authenticate, requireRole('admin'),
+  authenticate, requireRole('staff', 'admin'),
   [
     body('name').trim().notEmpty().withMessage('Court name is required.'),
     body('hourly_rate').optional().isFloat({ min: 0 }).withMessage('Hourly rate must be a valid positive number.'),
@@ -22,9 +22,9 @@ router.post('/',
   validate, svc.createCourt
 );
 
-// PUT /api/courts/:id — Admin: Edit court details
+// PUT /api/courts/:id — Staff/Admin: Edit court details & rate
 router.put('/:id',
-  authenticate, requireRole('admin'),
+  authenticate, requireRole('staff', 'admin'),
   [
     body('name').optional().trim().notEmpty().withMessage('Court name cannot be empty.'),
     body('hourly_rate').optional().isFloat({ min: 0 }).withMessage('Hourly rate must be a valid positive number.'),

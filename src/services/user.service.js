@@ -1,6 +1,10 @@
 const bcrypt = require('bcryptjs');
+const fs = require('fs');
+const path = require('path');
 const pool   = require('../config/db');
 const db     = require('../db/procedures');
+const { notifyStaffAndAdmin, notifyUser } = require('./notification.emitter');
+const { sendEmail } = require('./email.service');
 const { SALT_ROUNDS } = require('./auth.service');
 
 /** Helper to record customer audit log within a connection/pool */
@@ -255,6 +259,7 @@ async function getAllCustomers(req, res) {
         u.approved_by,
         u.approved_at,
         u.rejection_reason,
+        u.profile_photo_url,
         creator.full_name AS created_by_name,
         creator.role AS created_by_role,
         approver.full_name AS approved_by_name
@@ -326,6 +331,7 @@ async function getCustomerById(req, res) {
         u.approved_by,
         u.approved_at,
         u.rejection_reason,
+        u.profile_photo_url,
         creator.full_name AS created_by_name,
         approver.full_name AS approved_by_name
        FROM users u
@@ -601,6 +607,7 @@ async function getAllUsers(req, res) {
         u.approved_by,
         u.approved_at,
         u.rejection_reason,
+        u.profile_photo_url,
         creator.full_name AS created_by_name,
         approver.full_name AS approved_by_name
       FROM users u
@@ -643,6 +650,7 @@ async function getPendingUsers(req, res) {
         u.status,
         u.created_by,
         u.created_at,
+        u.profile_photo_url,
         creator.full_name AS creator_name
       FROM users u
       LEFT JOIN users creator ON u.created_by = creator.id
@@ -661,6 +669,20 @@ async function approveUser(req, res) {
   try {
     const user = await db.users.approve(parseInt(req.params.id, 10), req.user.id);
     if (!user) return res.status(404).json({ message: 'User not found.' });
+    
+    notifyStaffAndAdmin();
+    notifyUser(user.id);
+    
+    if (user.email) {
+      sendEmail(
+        user.email,
+        'Account Approved - Cambacay Breeze Inn',
+        `<h1>Welcome to Cambacay Breeze Inn!</h1>
+         <p>Hi ${user.full_name},</p>
+         <p>Your account has been approved by the administrator. You can now log in and start booking rooms and activities.</p>`
+      );
+    }
+    
     res.json({ message: 'User approved.', user });
   } catch (err) {
     res.status(500).json({ message: err.message });
@@ -673,6 +695,21 @@ async function rejectUser(req, res) {
     const { reason } = req.body;
     const user = await db.users.reject(parseInt(req.params.id, 10), req.user.id, reason || null);
     if (!user) return res.status(404).json({ message: 'User not found.' });
+    
+    notifyStaffAndAdmin();
+    notifyUser(user.id);
+
+    if (user.email) {
+      sendEmail(
+        user.email,
+        'Account Registration Update - Cambacay Breeze Inn',
+        `<h1>Cambacay Breeze Inn</h1>
+         <p>Hi ${user.full_name},</p>
+         <p>Unfortunately, your account registration could not be approved at this time.</p>
+         ${reason ? `<p>Reason: ${reason}</p>` : ''}`
+      );
+    }
+    
     res.json({ message: 'User rejected.', user });
   } catch (err) {
     res.status(500).json({ message: err.message });
@@ -862,6 +899,66 @@ async function searchCustomers(req, res) {
   return getAllCustomers(req, res);
 }
 
+
+
+// ─── PROFILE PHOTO ──────────────────────────────────────────────
+
+async function uploadProfilePhoto(req, res) {
+  if (!req.file) {
+    return res.status(400).json({ message: 'No photo provided.' });
+  }
+
+  const userId = req.user.id;
+  const photoUrl = `/uploads/${req.file.filename}`;
+  const conn = await pool.getConnection();
+
+  try {
+    const [rows] = await conn.query('SELECT profile_photo_url FROM users WHERE id = ?', [userId]);
+    const oldPhoto = rows[0]?.profile_photo_url;
+
+    await conn.query('UPDATE users SET profile_photo_url = ? WHERE id = ?', [photoUrl, userId]);
+
+    // Optional: delete old photo
+    if (oldPhoto && oldPhoto.startsWith('/uploads/')) {
+      const oldPath = path.join(__dirname, '..', '..', oldPhoto);
+      if (fs.existsSync(oldPath)) {
+        fs.unlinkSync(oldPath);
+      }
+    }
+
+    res.json({ message: 'Profile photo updated.', profile_photo_url: photoUrl });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  } finally {
+    conn.release();
+  }
+}
+
+async function removeProfilePhoto(req, res) {
+  const userId = req.user.id;
+  const conn = await pool.getConnection();
+
+  try {
+    const [rows] = await conn.query('SELECT profile_photo_url FROM users WHERE id = ?', [userId]);
+    const oldPhoto = rows[0]?.profile_photo_url;
+
+    if (oldPhoto) {
+      await conn.query('UPDATE users SET profile_photo_url = NULL WHERE id = ?', [userId]);
+      if (oldPhoto.startsWith('/uploads/')) {
+        const oldPath = path.join(__dirname, '..', '..', oldPhoto);
+        if (fs.existsSync(oldPath)) {
+          fs.unlinkSync(oldPath);
+        }
+      }
+    }
+    res.json({ message: 'Profile photo removed.' });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  } finally {
+    conn.release();
+  }
+}
+
 module.exports = {
   registerWalkInCustomer,
   getAllCustomers,
@@ -878,5 +975,7 @@ module.exports = {
   toggleUserStatus,
   createStaff,
   approveCustomerAccount,
+  uploadProfilePhoto,
+  removeProfilePhoto,
   searchCustomers,
 };

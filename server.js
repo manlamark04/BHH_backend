@@ -5,6 +5,8 @@ const bcrypt     = require('bcryptjs');
 const db         = require('./src/db/procedures');
 const fs         = require('fs');
 const path       = require('path');
+const http       = require('http');
+const socketConfig = require('./src/config/socket');
 
 const PORT = config.port;
 
@@ -43,7 +45,10 @@ async function start() {
     const { startScheduler } = require('./src/services/scheduler');
     startScheduler(60000); // 1 minute auto-cancel check
 
-    app.listen(PORT, () => {
+    const server = http.createServer(app);
+    socketConfig.init(server);
+
+    server.listen(PORT, () => {
       console.log(`🚀 BHH Backend running on http://localhost:${PORT}`);
       console.log(`   Environment: ${config.env}`);
     });

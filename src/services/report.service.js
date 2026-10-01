@@ -188,6 +188,44 @@ async function getAdminDashboard(req, res) {
     const occupiedRooms = Number(roomRows[0]?.occupied_rooms || 0);
     const occupancyRate = Math.round((occupiedRooms / (totalRooms || 1)) * 100);
 
+    // 8. Revenue Breakdown
+    let revenueBreakdown = [];
+    try {
+      const [roomRev] = await pool.query("SELECT COALESCE(SUM(amount), 0) AS rev FROM payments p JOIN bills b ON p.bill_id = b.id WHERE b.booking_id IS NOT NULL");
+      const [motorRev] = await pool.query("SELECT COALESCE(SUM(amount), 0) AS rev FROM payments p JOIN bills b ON p.bill_id = b.id WHERE b.motor_rental_id IS NOT NULL OR b.bill_number LIKE 'BILL-MOT%'");
+      const [activityRev] = await pool.query("SELECT COALESCE(SUM(amount), 0) AS rev FROM payments p JOIN bills b ON p.bill_id = b.id WHERE b.activity_rental_id IS NOT NULL");
+      
+      revenueBreakdown = [
+        { name: 'Rooms', value: parseFloat(roomRev[0]?.rev || 0) },
+        { name: 'Motorcycles', value: parseFloat(motorRev[0]?.rev || 0) },
+        { name: 'Activities', value: parseFloat(activityRev[0]?.rev || 0) }
+      ];
+    } catch (e) {
+      console.warn("Could not fetch revenue breakdown", e.message);
+    }
+
+    // 9. Bookings Over Last 30 Days (simplified 30-day generator for MySQL 5.7/8.0)
+    let bookings30Days = [];
+    try {
+      const [bk30] = await pool.query(`
+        SELECT 
+          DATE_FORMAT(d.dt, '%b %d') AS date_str,
+          COUNT(b.id) AS bookings
+        FROM (
+          SELECT CURDATE() - INTERVAL (a.a + (10 * b.a)) DAY AS dt
+          FROM (SELECT 0 AS a UNION ALL SELECT 1 UNION ALL SELECT 2 UNION ALL SELECT 3 UNION ALL SELECT 4 UNION ALL SELECT 5 UNION ALL SELECT 6 UNION ALL SELECT 7 UNION ALL SELECT 8 UNION ALL SELECT 9) as a
+          CROSS JOIN (SELECT 0 AS a UNION ALL SELECT 1 UNION ALL SELECT 2 UNION ALL SELECT 3) as b
+        ) d
+        LEFT JOIN bookings b ON DATE(b.created_at) = d.dt
+        WHERE d.dt > CURDATE() - INTERVAL 30 DAY AND d.dt <= CURDATE()
+        GROUP BY d.dt
+        ORDER BY d.dt ASC
+      `);
+      bookings30Days = bk30;
+    } catch (e) {
+      console.warn("Could not fetch 30-day bookings", e.message);
+    }
+
     res.json({
       kpis: {
         total_revenue: parseFloat(revRows[0]?.total_revenue || 0),
@@ -207,6 +245,8 @@ async function getAdminDashboard(req, res) {
       upcoming_arrivals: upcomingArrivals,
       recent_bookings: recentBookings,
       notifications,
+      revenue_breakdown: revenueBreakdown,
+      bookings_30days: bookings30Days,
     });
   } catch (err) {
     console.error('getAdminDashboard error:', err);

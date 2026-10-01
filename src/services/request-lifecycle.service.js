@@ -1,4 +1,5 @@
 const pool = require('../config/db');
+const { sendEmail } = require('./email.service');
 
 const MIN_DEPOSIT_PERCENT = parseFloat(process.env.MIN_DEPOSIT_PERCENT || '100');
 const PENDING_PAYMENT_TIMEOUT_HOURS = parseInt(process.env.PENDING_PAYMENT_TIMEOUT_HOURS || '24', 10);
@@ -143,7 +144,7 @@ async function handlePaymentReceived(entityType, entityId, paymentInfo = {}) {
   const gate = await checkPaymentGate(entityType, entityId);
   const normStatus = String(gate.currentStatus || '').toLowerCase();
 
-  if (gate.isPaid && (normStatus === 'pending_payment' || normStatus === 'pending_approval' || normStatus === 'pending' || normStatus === 'requested' || normStatus === 'confirmed' || normStatus === 'reserved')) {
+  if (gate.isPaid && (normStatus === 'pending_payment' || normStatus === 'pending' || normStatus === 'requested' || normStatus === 'confirmed' || normStatus === 'reserved')) {
     const targetStatus = entityType === 'motor_rental' ? 'ACTIVE' : (entityType === 'booking' ? 'checked_in' : 'active');
     const tableName = entityType === 'booking' ? 'bookings' : (entityType === 'motor_rental' ? 'motor_rentals' : 'activity_rentals');
 
@@ -186,6 +187,21 @@ async function handlePaymentReceived(entityType, entityId, paymentInfo = {}) {
       metadata: { totalPaid: gate.totalPaid, depositRequired: gate.depositRequired, payment: gate.latestPayment },
     });
 
+    if (gate.customerId) {
+      const [userRows] = await pool.query('SELECT full_name, email FROM users WHERE id = ?', [gate.customerId]);
+      const user = userRows[0];
+      if (user && user.email) {
+        let entityName = entityType === 'booking' ? 'room booking' : (entityType === 'motor_rental' ? 'motorcycle rental' : 'pickleball court session');
+        sendEmail(
+          user.email,
+          'Reservation Confirmed - Cambacay Breeze Inn',
+          `<h1>Reservation Confirmed</h1>
+           <p>Hi ${user.full_name},</p>
+           <p>Your payment of ₱${gate.totalPaid.toLocaleString()} has been received and your ${entityName} is now confirmed. Thank you!</p>`
+        );
+      }
+    }
+
     return { transitioned: true, newStatus: targetStatus };
   }
 
@@ -199,8 +215,8 @@ async function approveRequest(entityType, entityId, staffUser) {
   const gate = await checkPaymentGate(entityType, entityId);
   const normStatus = String(gate.currentStatus || '').toLowerCase();
 
-  // Must be in pending_approval (or pending_payment, pending, requested, confirmed)
-  if (!['pending_approval', 'pending_payment', 'pending', 'requested', 'confirmed'].includes(normStatus)) {
+  // Must be in pending_payment, pending, requested, confirmed
+  if (!['pending_payment', 'pending', 'requested', 'confirmed'].includes(normStatus)) {
     const err = new Error(`Cannot approve request with current status "${gate.currentStatus}".`);
     err.statusCode = 400;
     throw err;
@@ -256,7 +272,7 @@ async function approveRequest(entityType, entityId, staffUser) {
       LEFT JOIN users u ON u.id = b.customer_id
       WHERE b.room_id = ?
         AND b.id != ?
-        AND b.status IN ('pending_approval', 'pending_payment', 'pending', 'requested')
+        AND b.status IN ('pending_payment', 'pending', 'requested')
         AND (b.check_in < ? AND b.check_out > ?)
     `, [currentBooking.room_id, entityId, currentBooking.check_out, currentBooking.check_in]);
 
@@ -275,7 +291,7 @@ async function approveRequest(entityType, entityId, staffUser) {
       await logAudit(pool, {
         entityType: 'booking',
         entityId: conflict.id,
-        fromStatus: 'pending_approval',
+        fromStatus: 'pending_payment',
         toStatus: 'rejected',
         performedBy: staffUser.id,
         performedByName: staffUser.full_name || staffUser.username,
@@ -329,7 +345,7 @@ async function approveRequest(entityType, entityId, staffUser) {
       LEFT JOIN users u ON u.id = mr.customer_id
       WHERE mr.motor_id = ?
         AND mr.id != ?
-        AND mr.status IN ('PENDING_APPROVAL', 'PENDING_PAYMENT', 'PENDING')
+        AND mr.status IN ('PENDING_PAYMENT', 'PENDING')
         AND (mr.start_datetime < ? AND mr.expected_return_datetime > ?)
     `, [currentRental.motor_id, entityId, currentRental.expected_return_datetime, currentRental.start_datetime]);
 
@@ -348,7 +364,7 @@ async function approveRequest(entityType, entityId, staffUser) {
       await logAudit(pool, {
         entityType: 'motor_rental',
         entityId: conflict.id,
-        fromStatus: 'PENDING_APPROVAL',
+        fromStatus: 'PENDING_PAYMENT',
         toStatus: 'REJECTED',
         performedBy: staffUser.id,
         performedByName: staffUser.full_name || staffUser.username,
@@ -471,6 +487,22 @@ async function rejectRequest(entityType, entityId, staffUser, reason, notes = ''
     metadata: { refundId, amountToRefund: gate.totalPaid },
   });
 
+  if (gate.customerId) {
+    const [userRows] = await pool.query('SELECT full_name, email FROM users WHERE id = ?', [gate.customerId]);
+    const user = userRows[0];
+    if (user && user.email) {
+      let entityName = entityType === 'booking' ? 'room booking' : (entityType === 'motor_rental' ? 'motorcycle rental' : 'pickleball court session');
+      sendEmail(
+        user.email,
+        'Reservation Update - Cambacay Breeze Inn',
+        `<h1>Reservation Rejected</h1>
+         <p>Hi ${user.full_name},</p>
+         <p>Unfortunately, your ${entityName} reservation has been rejected by our staff.</p>
+         <p>Reason: ${fullReason}</p>`
+      );
+    }
+  }
+
   return {
     success: true,
     status: targetStatus,
@@ -546,6 +578,22 @@ async function cancelRequest(entityType, entityId, user, reason = 'Cancelled by 
       totalPaid: gate.totalPaid,
     },
   });
+
+  if (gate.customerId) {
+    const [userRows] = await pool.query('SELECT full_name, email FROM users WHERE id = ?', [gate.customerId]);
+    const user = userRows[0];
+    if (user && user.email) {
+      let entityName = entityType === 'booking' ? 'room booking' : (entityType === 'motor_rental' ? 'motorcycle rental' : 'pickleball court session');
+      sendEmail(
+        user.email,
+        'Reservation Cancelled - Cambacay Breeze Inn',
+        `<h1>Reservation Cancelled</h1>
+         <p>Hi ${user.full_name},</p>
+         <p>Your ${entityName} reservation has been cancelled.</p>
+         <p>Reason: ${reason}</p>`
+      );
+    }
+  }
 
   return { success: true, status: targetStatus, cancellation_fee: fee, message: 'Request cancelled.' };
 }
@@ -625,7 +673,7 @@ async function getAuditTrail(entityType, entityId) {
 }
 
 /**
- * Auto-sync all paid requests currently in pending_payment / pending_approval to confirmed / active
+ * Auto-sync all paid requests currently in pending_payment to confirmed / active
  */
 async function syncPaidRequestsToConfirmed() {
   try {
@@ -635,7 +683,7 @@ async function syncPaidRequestsToConfirmed() {
       FROM bookings b
       JOIN bills bill ON bill.booking_id = b.id
       JOIN payments p ON p.bill_id = bill.id
-      WHERE b.status IN ('pending_payment', 'pending_approval', 'requested', 'pending')
+      WHERE b.status IN ('pending_payment', 'requested', 'pending')
         AND (p.notes IS NULL OR p.notes NOT LIKE '%[REFUNDED%')
       GROUP BY b.id, b.status
       HAVING SUM(p.amount) > 0
@@ -651,7 +699,7 @@ async function syncPaidRequestsToConfirmed() {
       FROM activity_rentals ar
       JOIN bills bill ON bill.activity_rental_id = ar.id
       JOIN payments p ON p.bill_id = bill.id
-      WHERE ar.status IN ('pending_payment', 'pending_approval', 'requested', 'pending')
+      WHERE ar.status IN ('pending_payment', 'requested', 'pending')
         AND (p.notes IS NULL OR p.notes NOT LIKE '%[REFUNDED%')
       GROUP BY ar.id, ar.status
       HAVING SUM(p.amount) > 0
@@ -667,7 +715,7 @@ async function syncPaidRequestsToConfirmed() {
       FROM motor_rentals mr
       JOIN bills bill ON bill.customer_id = mr.customer_id AND bill.bill_number LIKE CONCAT('%', mr.rental_id, '%')
       JOIN payments p ON p.bill_id = bill.id
-      WHERE mr.status IN ('PENDING_PAYMENT', 'PENDING_APPROVAL', 'PENDING')
+      WHERE mr.status IN ('PENDING_PAYMENT', 'PENDING')
         AND (p.notes IS NULL OR p.notes NOT LIKE '%[REFUNDED%')
       GROUP BY mr.id, mr.status
       HAVING SUM(p.amount) > 0
