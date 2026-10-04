@@ -375,7 +375,7 @@ async function createMotorRental(req, res) {
       targetCustomerId = req.user.id;
     }
 
-    if (!targetCustomerId) {
+    if (!targetCustomerId && req.user.role === 'customer') {
       return res.status(400).json({ message: 'Customer ID is required.' });
     }
     if (!motor_id) {
@@ -541,47 +541,50 @@ async function createMotorRental(req, res) {
 
     const finalNotes = notes ? (notes.includes("[Driver's License:") || notes.includes("[Foreign License") ? notes : `${notes}\n${licenseBadge}`) : licenseBadge;
 
-    // 1. Verify Customer exists and is active
-    const [custRows] = await conn.query('SELECT id, unique_id, full_name, email, phone, status FROM users WHERE id = ?', [targetCustomerId]);
-    if (!custRows || custRows.length === 0) {
-      return res.status(404).json({ message: 'Customer account not found.' });
-    }
-    const customer = custRows[0];
-    if (customer.status !== 'active') {
-      return res.status(400).json({ message: `Customer account is ${customer.status}. Only active customers can rent motorcycles.` });
-    }
+    // 1. Verify Customer exists and is active (if targetCustomerId is provided)
+    let customer = { full_name: 'Walk-in Guest (Anonymous)', status: 'active' };
+    if (targetCustomerId) {
+      const [custRows] = await conn.query('SELECT id, unique_id, full_name, email, phone, status FROM users WHERE id = ?', [targetCustomerId]);
+      if (!custRows || custRows.length === 0) {
+        return res.status(404).json({ message: 'Customer account not found.' });
+      }
+      customer = custRows[0];
+      if (customer.status !== 'active') {
+        return res.status(400).json({ message: `Customer account is ${customer.status}. Only active customers can rent motorcycles.` });
+      }
 
-    // 1b. Enforce One-Motorcycle-Rental-at-a-Time rule:
-    // A guest who already has an in-progress rental (PENDING_PAYMENT, ACTIVE, RESERVED, OVERDUE)
-    // cannot rent another motorcycle until their current rental is COMPLETED, CANCELLED, or REJECTED.
-    const [existingRentals] = await conn.query(
-      `SELECT mr.id, mr.rental_id, mr.status, mr.start_datetime, mr.expected_return_datetime,
-              m.brand, m.model, m.plate_number
-       FROM motor_rentals mr
-       JOIN motorcycles m ON m.id = mr.motor_id
-       WHERE mr.customer_id = ?
-         AND mr.status IN ('PENDING_PAYMENT', 'ACTIVE', 'RESERVED', 'OVERDUE')
-       ORDER BY mr.id DESC
-       LIMIT 1`,
-      [targetCustomerId]
-    );
+      // 1b. Enforce One-Motorcycle-Rental-at-a-Time rule:
+      // A guest who already has an in-progress rental (PENDING_PAYMENT, ACTIVE, RESERVED, OVERDUE)
+      // cannot rent another motorcycle until their current rental is COMPLETED, CANCELLED, or REJECTED.
+      const [existingRentals] = await conn.query(
+        `SELECT mr.id, mr.rental_id, mr.status, mr.start_datetime, mr.expected_return_datetime,
+                m.brand, m.model, m.plate_number
+         FROM motor_rentals mr
+         JOIN motorcycles m ON m.id = mr.motor_id
+         WHERE mr.customer_id = ?
+           AND mr.status IN ('PENDING_PAYMENT', 'ACTIVE', 'RESERVED', 'OVERDUE')
+         ORDER BY mr.id DESC
+         LIMIT 1`,
+        [targetCustomerId]
+      );
 
-    if (existingRentals && existingRentals.length > 0) {
-      const activeR = existingRentals[0];
-      const bikeLabel = `${activeR.brand || ''} ${activeR.model || 'Motorcycle'}`.trim();
-      const plateLabel = activeR.plate_number ? ` · Plate ${activeR.plate_number}` : '';
-      const statusLabel = String(activeR.status).replace('_', ' ');
+      if (existingRentals && existingRentals.length > 0) {
+        const activeR = existingRentals[0];
+        const bikeLabel = `${activeR.brand || ''} ${activeR.model || 'Motorcycle'}`.trim();
+        const plateLabel = activeR.plate_number ? ` · Plate ${activeR.plate_number}` : '';
+        const statusLabel = String(activeR.status).replace('_', ' ');
 
-      const message = req.user.role === 'customer'
-        ? `You already have a motorcycle rental in progress (${bikeLabel}${plateLabel} · ${statusLabel}). You can only rent one motorcycle at a time. Please complete or return your current rental before renting another.`
-        : `Guest ${customer.full_name || 'Guest'} already has an active or pending motorcycle rental (${bikeLabel}${plateLabel} · ${statusLabel}). Only one motorcycle rental is permitted per guest at a time.`;
+        const message = req.user.role === 'customer'
+          ? `You already have a motorcycle rental in progress (${bikeLabel}${plateLabel} · ${statusLabel}). You can only rent one motorcycle at a time. Please complete or return your current rental before renting another.`
+          : `Guest ${customer.full_name || 'Guest'} already has an active or pending motorcycle rental (${bikeLabel}${plateLabel} · ${statusLabel}). Only one motorcycle rental is permitted per guest at a time.`;
 
-      return res.status(409).json({
-        conflict: true,
-        has_active_rental: true,
-        existing_rental: activeR,
-        message
-      });
+        return res.status(409).json({
+          conflict: true,
+          has_active_rental: true,
+          existing_rental: activeR,
+          message
+        });
+      }
     }
 
     // Begin Database Transaction with pessimistic row-locking to prevent concurrent double-booking
@@ -650,6 +653,7 @@ async function createMotorRental(req, res) {
     let initialStatus = 'PENDING_PAYMENT';
 
     // Insert into motor_rentals
+    console.log('[createRental] Inserting into motor_rentals with targetCustomerId:', targetCustomerId);
     const [rentalResult] = await conn.query(
       `INSERT INTO motor_rentals (
         rental_id, customer_id, motor_id, start_datetime, expected_return_datetime,
@@ -695,6 +699,7 @@ async function createMotorRental(req, res) {
     const billNumber = `BILL-${rentalId}`;
     const initialPayAmount = req.body.initial_payment ? Number(req.body.initial_payment) : 0;
 
+    console.log('[createRental] Inserting into bills with targetCustomerId:', targetCustomerId);
     const [billRes] = await conn.query(`
       INSERT INTO bills (
         bill_number, customer_id, motor_rental_id, total_amount, paid_amount, status,
@@ -727,12 +732,14 @@ async function createMotorRental(req, res) {
 
     const billId = billRes.insertId;
 
+    console.log('[createRental] Inserting into bill_line_items');
     await conn.query(`
       INSERT INTO bill_line_items (bill_id, description, quantity, unit_price)
       VALUES (?, ?, ?, ?)
     `, [billId, `Motor Rental: ${motor.brand} ${motor.model} (${motor.plate_number}) - ${duration} ${rateType === 'hourly' ? 'hour(s)' : 'day(s)'}`, duration, rate]);
 
     if (initialPayAmount > 0) {
+      console.log('[createRental] Inserting into payments');
       await conn.query(`
         INSERT INTO payments (bill_id, amount, method, received_by, notes, paid_at)
         VALUES (?, ?, ?, ?, ?, NOW())
@@ -783,7 +790,7 @@ async function createMotorRental(req, res) {
         creator.full_name AS created_by_name
        FROM motor_rentals mr
        JOIN motorcycles m ON mr.motor_id = m.id
-       JOIN users u ON mr.customer_id = u.id
+       LEFT JOIN users u ON mr.customer_id = u.id
        LEFT JOIN users creator ON mr.created_by = creator.id
        WHERE mr.id = ?`,
       [newRentalDbId]
@@ -796,7 +803,7 @@ async function createMotorRental(req, res) {
   } catch (err) {
     await conn.rollback();
     console.error('Motor rental transaction error:', err);
-    res.status(500).json({ message: err.message || 'Failed to process motorcycle rental.' });
+    res.status(500).json({ message: err.message || 'Failed to process motorcycle rental.', sql: err.sql, sqlMessage: err.sqlMessage, stack: err.stack });
   } finally {
     conn.release();
   }
@@ -818,7 +825,7 @@ async function getAllRentals(req, res) {
         returner.full_name AS returned_by_name
       FROM motor_rentals mr
       JOIN motorcycles m ON mr.motor_id = m.id
-      JOIN users u ON mr.customer_id = u.id
+      LEFT JOIN users u ON mr.customer_id = u.id
       LEFT JOIN users creator ON mr.created_by = creator.id
       LEFT JOIN users returner ON mr.returned_by = returner.id
       WHERE 1=1
@@ -870,7 +877,7 @@ async function getRentalById(req, res) {
         returner.full_name AS returned_by_name
        FROM motor_rentals mr
        JOIN motorcycles m ON mr.motor_id = m.id
-       JOIN users u ON mr.customer_id = u.id
+       LEFT JOIN users u ON mr.customer_id = u.id
        LEFT JOIN users creator ON mr.created_by = creator.id
        LEFT JOIN users returner ON mr.returned_by = returner.id
        WHERE mr.id = ? OR mr.rental_id = ?`,
@@ -1429,6 +1436,12 @@ async function cancelMotorRental(req, res) {
       performedByRole: req.user.role,
       remarks: 'Rental cancelled by user. Motorcycle status restored to AVAILABLE.',
     });
+
+    // Also cancel the associated bill if it exists
+    await conn.query(
+      "UPDATE bills SET status = 'cancelled', updated_at = NOW() WHERE motor_rental_id = ? OR bill_number = ?",
+      [rental.id, `BILL-${rental.rental_id}`]
+    );
 
     await conn.commit();
     res.json({ message: 'Rental cancelled successfully.' });

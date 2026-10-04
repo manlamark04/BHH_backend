@@ -136,10 +136,12 @@ async function getAllBills(req, res) {
         r.room_number,
         r.room_type,
         ar.status AS activity_status,
+        ar.notes AS activity_notes,
         a.name AS activity_name,
         ar.start_time AS activity_start_time,
         ar.end_time AS activity_end_time,
         mr.status AS motor_status,
+        mr.notes AS motor_notes,
         mr.rental_id AS motor_rental_code,
         mr.license_type AS motor_license_type,
         mr.passport_number AS motor_passport_number,
@@ -350,15 +352,27 @@ async function getAllBills(req, res) {
       const idpExpiry = b.bill_idp_expiry || b.motor_idp_expiry || null;
       const idpCategoryA = Boolean(b.bill_idp_category_a || b.motor_idp_category_a);
 
+      const combinedNotes = [b.motor_notes, b.activity_notes].filter(Boolean).join(' ');
+      let finalCustomerName = b.customer_name;
+      let finalCustomerEmail = b.customer_email;
+      let finalCustomerPhone = b.customer_phone;
+      
+      const walkInMatch = combinedNotes.match(/\[Walk-in Guest Info: Name: (.*?) \| Phone: (.*?) \| Email: (.*?)\]/i);
+      if (walkInMatch && !b.customer_id) {
+        finalCustomerName = walkInMatch[1].trim() !== 'N/A' && walkInMatch[1].trim() !== '' ? walkInMatch[1].trim() + ' (Walk-in)' : 'Walk-in Guest (Anonymous)';
+        finalCustomerPhone = walkInMatch[2].trim() !== 'N/A' ? walkInMatch[2].trim() : b.customer_phone;
+        finalCustomerEmail = walkInMatch[3].trim() !== 'N/A' ? walkInMatch[3].trim() : b.customer_email;
+      }
+
       return {
         id: b.id,
         invoice_number: invoiceNumber,
         bill_number: b.bill_number,
         customer_id: b.customer_id,
-        customer_name: b.customer_name,
+        customer_name: finalCustomerName,
         customer_code: b.customer_code,
-        customer_email: b.customer_email,
-        customer_phone: b.customer_phone,
+        customer_email: finalCustomerEmail,
+        customer_phone: finalCustomerPhone,
         booking_id: b.booking_id,
         booking_ref: bookingRef,
         booking_status: b.booking_status,
@@ -998,6 +1012,27 @@ async function recordPayment(req, res) {
           customerPhone = custRows[0].phone;
         }
       } catch (_) {}
+    } else {
+      // Try to extract walk-in info
+      try {
+        const [mrRows] = await pool.query(`
+          SELECT mr.notes AS motor_notes, ar.notes AS activity_notes
+          FROM bills b
+          LEFT JOIN motor_rentals mr ON mr.id = b.motor_rental_id OR (b.motor_rental_id IS NULL AND b.bill_number LIKE CONCAT('BILL-', mr.rental_id))
+          LEFT JOIN activity_rentals ar ON ar.id = b.activity_rental_id
+          WHERE b.id = ?
+        `, [targetBillId]);
+
+        if (mrRows.length > 0) {
+          const combinedNotes = [mrRows[0].motor_notes, mrRows[0].activity_notes].filter(Boolean).join(' ');
+          const walkInMatch = combinedNotes.match(/\[Walk-in Guest Info: Name: (.*?) \| Phone: (.*?) \| Email: (.*?)\]/i);
+          if (walkInMatch) {
+            customerName = walkInMatch[1].trim() !== 'N/A' && walkInMatch[1].trim() !== '' ? walkInMatch[1].trim() + ' (Walk-in)' : 'Walk-in Guest (Anonymous)';
+            if (walkInMatch[2].trim() !== 'N/A') customerPhone = walkInMatch[2].trim();
+            if (walkInMatch[3].trim() !== 'N/A') customerEmail = walkInMatch[3].trim();
+          }
+        }
+      } catch (_) {}
     }
 
     const staffName = req.user.full_name || req.user.username || 'Front Desk Staff';
@@ -1162,8 +1197,14 @@ async function cancelBill(req, res) {
       await pool.query("UPDATE activity_rentals SET status = 'cancelled', updated_at = NOW() WHERE id = ?", [bill.activity_rental_id]);
     }
 
-    // If associated with motor rental (e.g. BILL-MTR-xxx)
-    if (bill.bill_number && bill.bill_number.startsWith('BILL-MTR')) {
+    // If associated with motor rental
+    if (bill.motor_rental_id) {
+      await pool.query("UPDATE motor_rentals SET status = 'CANCELLED', updated_at = NOW() WHERE id = ?", [bill.motor_rental_id]);
+      const [mrRows] = await pool.query("SELECT motor_id FROM motor_rentals WHERE id = ?", [bill.motor_rental_id]);
+      if (mrRows.length > 0 && mrRows[0].motor_id) {
+        await pool.query("UPDATE motorcycles SET status = 'AVAILABLE' WHERE id = ?", [mrRows[0].motor_id]);
+      }
+    } else if (bill.bill_number && bill.bill_number.startsWith('BILL-MTR')) {
       const [mrRows] = await pool.query("SELECT * FROM motor_rentals WHERE customer_id = ? AND status IN ('PENDING_PAYMENT', 'PENDING_APPROVAL', 'REQUESTED') ORDER BY id DESC LIMIT 1", [bill.customer_id]);
       if (mrRows.length > 0) {
         await pool.query("UPDATE motor_rentals SET status = 'CANCELLED', updated_at = NOW() WHERE id = ?", [mrRows[0].id]);
