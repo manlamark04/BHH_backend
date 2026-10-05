@@ -472,19 +472,23 @@ async function createBooking(req, res) {
 
       // Set payment deadline (e.g. NOW + 24 hours)
       const paymentDeadline = requestLifecycle.getPaymentDeadline();
-      let initialStatus = 'pending_payment';
+      
+      const isToday = new Date(check_in).setHours(0,0,0,0) <= new Date().setHours(0,0,0,0);
+      const isStaffCreation = req.user.role === 'staff' || req.user.role === 'admin';
+      let initialStatus = (isStaffCreation && (isToday || isShortTime)) ? 'checked_in' : 'pending_payment';
+      const isArrived = initialStatus === 'checked_in' ? 1 : 0;
 
       // Insert booking
       const [result] = await conn.query(`
-        INSERT INTO bookings (customer_id, room_id, booking_type, check_in, check_out, check_in_time, duration_hours, status, notes, payment_deadline, created_by, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
+        INSERT INTO bookings (customer_id, room_id, booking_type, check_in, check_out, check_in_time, duration_hours, status, is_arrived, notes, payment_deadline, created_by, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
       `, [
         targetCustomerId, room_id,
         isShortTime ? 'short_time' : 'per_night',
         effectiveCheckIn, effectiveCheckOut,
         isShortTime ? check_in_time : null,
         isShortTime ? parseInt(duration_hours, 10) : null,
-        initialStatus, notes || null, paymentDeadline, createdBy,
+        initialStatus, isArrived, notes || null, paymentDeadline, createdBy,
       ]);
 
       const newBookingId = result.insertId;

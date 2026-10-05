@@ -102,7 +102,10 @@ async function registerWalkInCustomer(req, res) {
 
     const cleanFirstName = first_name.trim();
     const cleanMiddleName = middle_name ? middle_name.trim() : null;
-    const cleanLastName = last_name.trim();
+    let cleanLastName = last_name.trim();
+    if (!cleanLastName.toLowerCase().endsWith('(walk-in)')) {
+        cleanLastName += ' (Walk-in)';
+    }
     const cleanPhone = phone.trim();
     const digitsPhone = cleanPhone.replace(/\D/g, '');
     if (!/^09\d{9}$/.test(digitsPhone)) {
@@ -164,7 +167,7 @@ async function registerWalkInCustomer(req, res) {
         email, phone, address, dob, gender, civil_status,
         username, password_hash, must_change_password, status,
         created_by, created_at, updated_at
-      ) VALUES (?, 'customer', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, TRUE, 'pending', ?, NOW(), NOW())`,
+      ) VALUES (?, 'customer', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, TRUE, 'active', ?, NOW(), NOW())`,
       [
         customerId,
         fullName,
