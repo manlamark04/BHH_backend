@@ -107,6 +107,18 @@ async function getMotorcycles(req, res) {
         m.rate_type,
         m.description,
         m.image_url,
+        m.or_image_url,
+        m.cr_image_url,
+        m.registration_expiry_date,
+        m.year_model,
+        m.color,
+        m.displacement,
+        m.engine_number,
+        m.chassis_number,
+        m.registered_owner,
+        m.insurance_provider,
+        m.insurance_policy_number,
+        m.insurance_expiry_date,
         CASE 
           WHEN m.status = 'MAINTENANCE' THEN 'MAINTENANCE'
           WHEN m.status = 'RESERVED' THEN 'RESERVED'
@@ -166,7 +178,7 @@ async function getMotorcycleById(req, res) {
 /** POST /api/motorcycles — Admin: Add motorcycle to fleet */
 async function createMotorcycle(req, res) {
   try {
-    const { brand, model, type, plate_number, rental_rate, late_fee_hourly_rate, rate_type, description, image_url, status } = req.body;
+    const { brand, model, type, plate_number, rental_rate, late_fee_hourly_rate, rate_type, description, image_url, status, or_image_url, cr_image_url, registration_expiry_date, year_model, color, displacement, engine_number, chassis_number, registered_owner, insurance_provider, insurance_policy_number, insurance_expiry_date } = req.body;
 
     if (!brand || !model || !type || !plate_number || !rental_rate) {
       return res.status(400).json({ message: 'Brand, model, type, plate number, and rental rate are required.' });
@@ -183,11 +195,13 @@ async function createMotorcycle(req, res) {
     const [countRows] = await pool.query('SELECT COUNT(*) as count FROM motorcycles');
     const motorId = `MOT-${currentYear}-${String(countRows[0].count + 1).padStart(4, '0')}`;
     const processedImageUrl = image_url ? saveBase64Image(image_url, `motor-${motorId.toLowerCase()}`) : null;
+    const processedOrImageUrl = or_image_url ? saveBase64Image(or_image_url, `motor-${motorId.toLowerCase()}-or`) : null;
+    const processedCrImageUrl = cr_image_url ? saveBase64Image(cr_image_url, `motor-${motorId.toLowerCase()}-cr`) : null;
 
     const [result] = await pool.query(
       `INSERT INTO motorcycles 
-        (motor_id, brand, model, type, plate_number, rental_rate, late_fee_hourly_rate, rate_type, description, image_url, status)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        (motor_id, brand, model, type, plate_number, rental_rate, late_fee_hourly_rate, rate_type, description, image_url, status, or_image_url, cr_image_url, registration_expiry_date, year_model, color, displacement, engine_number, chassis_number, registered_owner, insurance_provider, insurance_policy_number, insurance_expiry_date)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         motorId,
         brand.trim(),
@@ -200,6 +214,18 @@ async function createMotorcycle(req, res) {
         description || null,
         processedImageUrl,
         status || 'AVAILABLE',
+        processedOrImageUrl,
+        processedCrImageUrl,
+        registration_expiry_date || null,
+        year_model || null,
+        color || null,
+        displacement || null,
+        engine_number || null,
+        chassis_number || null,
+        registered_owner || null,
+        insurance_provider || null,
+        insurance_policy_number || null,
+        insurance_expiry_date || null,
       ]
     );
 
@@ -213,7 +239,7 @@ async function createMotorcycle(req, res) {
 /** PUT /api/motorcycles/:id — Admin: Update motorcycle details */
 async function updateMotorcycle(req, res) {
   try {
-    const { brand, model, type, plate_number, rental_rate, late_fee_hourly_rate, rate_type, description, image_url, status } = req.body;
+    const { brand, model, type, plate_number, rental_rate, late_fee_hourly_rate, rate_type, description, image_url, status, or_image_url, cr_image_url, registration_expiry_date, year_model, color, displacement, engine_number, chassis_number, registered_owner, insurance_provider, insurance_policy_number, insurance_expiry_date } = req.body;
     const motorId = req.params.id;
 
     // 1. Verify motorcycle exists
@@ -235,6 +261,8 @@ async function updateMotorcycle(req, res) {
 
     // 3. Process base64 image if uploaded
     const processedImageUrl = image_url !== undefined ? saveBase64Image(image_url, `motor-${motorId}`) : undefined;
+    const processedOrImageUrl = or_image_url !== undefined ? saveBase64Image(or_image_url, `motor-${motorId}-or`) : undefined;
+    const processedCrImageUrl = cr_image_url !== undefined ? saveBase64Image(cr_image_url, `motor-${motorId}-cr`) : undefined;
 
     const parsedLateRate = late_fee_hourly_rate !== undefined
       ? (late_fee_hourly_rate !== null && late_fee_hourly_rate !== '' ? parseFloat(late_fee_hourly_rate) : null)
@@ -253,6 +281,18 @@ async function updateMotorcycle(req, res) {
            description = COALESCE(?, description),
            image_url = COALESCE(?, image_url),
            status = COALESCE(?, status),
+           or_image_url = COALESCE(?, or_image_url),
+           cr_image_url = COALESCE(?, cr_image_url),
+           registration_expiry_date = COALESCE(?, registration_expiry_date),
+           year_model = COALESCE(?, year_model),
+           color = COALESCE(?, color),
+           displacement = COALESCE(?, displacement),
+           engine_number = COALESCE(?, engine_number),
+           chassis_number = COALESCE(?, chassis_number),
+           registered_owner = COALESCE(?, registered_owner),
+           insurance_provider = COALESCE(?, insurance_provider),
+           insurance_policy_number = COALESCE(?, insurance_policy_number),
+           insurance_expiry_date = COALESCE(?, insurance_expiry_date),
            updated_at = NOW()
        WHERE id = ?`,
       [
@@ -266,6 +306,18 @@ async function updateMotorcycle(req, res) {
         description !== undefined ? description : null,
         processedImageUrl !== undefined ? processedImageUrl : null,
         status || null,
+        processedOrImageUrl !== undefined ? processedOrImageUrl : null,
+        processedCrImageUrl !== undefined ? processedCrImageUrl : null,
+        registration_expiry_date !== undefined ? registration_expiry_date : null,
+        year_model !== undefined ? year_model : null,
+        color !== undefined ? color : null,
+        displacement !== undefined ? displacement : null,
+        engine_number !== undefined ? engine_number : null,
+        chassis_number !== undefined ? chassis_number : null,
+        registered_owner !== undefined ? registered_owner : null,
+        insurance_provider !== undefined ? insurance_provider : null,
+        insurance_policy_number !== undefined ? insurance_policy_number : null,
+        insurance_expiry_date !== undefined ? insurance_expiry_date : null,
         motorId
       ]
     );

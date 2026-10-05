@@ -28,6 +28,18 @@ async function migrate() {
         description TEXT,
         image_url TEXT,
         status ENUM('AVAILABLE','RESERVED','RENTED','MAINTENANCE','INACTIVE') NOT NULL DEFAULT 'AVAILABLE',
+        or_image_url TEXT,
+        cr_image_url TEXT,
+        registration_expiry_date DATE,
+        year_model INT,
+        color VARCHAR(100),
+        displacement VARCHAR(50),
+        engine_number VARCHAR(100),
+        chassis_number VARCHAR(100),
+        registered_owner VARCHAR(255),
+        insurance_provider VARCHAR(255),
+        insurance_policy_number VARCHAR(100),
+        insurance_expiry_date DATE,
         created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
         INDEX idx_motor_status (status),
@@ -165,9 +177,9 @@ async function migrate() {
 
       for (const m of seedMotors) {
         await connection.query(
-          `INSERT INTO motorcycles (motor_id, brand, model, type, plate_number, rental_rate, rate_type, description, image_url, status)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [m.motor_id, m.brand, m.model, m.type, m.plate_number, m.rental_rate, m.rate_type, m.description, m.image_url, m.status]
+          `INSERT INTO motorcycles (motor_id, brand, model, type, plate_number, rental_rate, rate_type, description, image_url, status, or_image_url, cr_image_url, registration_expiry_date, year_model, color, displacement, engine_number, chassis_number, registered_owner, insurance_provider, insurance_policy_number, insurance_expiry_date)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [m.motor_id, m.brand, m.model, m.type, m.plate_number, m.rental_rate, m.rate_type, m.description, m.image_url, m.status, m.or_image_url, m.cr_image_url, m.registration_expiry_date, m.year_model, m.color, m.displacement, m.engine_number, m.chassis_number, m.registered_owner, m.insurance_provider, m.insurance_policy_number, m.insurance_expiry_date]
         );
       }
       console.log(`✅ Seeded ${seedMotors.length} motorcycles.`);
