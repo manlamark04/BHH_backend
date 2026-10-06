@@ -1125,6 +1125,46 @@ async function processMotorReturn(req, res) {
       };
     }
 
+    // Add late fee to bill if applicable
+    if (lateFee > 0 && !isWaived) {
+      const [billRowsLate] = await conn.query(
+        `SELECT id, bill_number, total_amount, paid_amount 
+         FROM bills 
+         WHERE motor_rental_id = ? OR bill_number = ? 
+         ORDER BY id DESC LIMIT 1`,
+        [rental.id, `BILL-${rental.rental_id}`]
+      );
+
+      if (billRowsLate.length > 0) {
+        const b = billRowsLate[0];
+        // Insert line item
+        await conn.query(
+          `INSERT INTO bill_line_items (bill_id, description, quantity, unit_price)
+           VALUES (?, ?, 1, ?)`,
+          [
+            b.id,
+            `Late Return Penalty (${hoursLate} hr${hoursLate > 1 ? 's' : ''} late × ₱${hourlyLateRate}/hr) — ${rental.rental_id}`,
+            lateFee,
+          ]
+        );
+
+        // Update bill totals
+        const newTotal = parseFloat(b.total_amount) + lateFee;
+        const paidAmt = parseFloat(b.paid_amount || 0);
+        const newStatus = paidAmt >= newTotal ? 'paid' : (paidAmt > 0 ? 'partially_paid' : 'unpaid');
+
+        await conn.query(
+          `UPDATE bills 
+           SET total_amount = ?,
+               status = ?,
+               updated_at = NOW()
+           WHERE id = ?`,
+          [newTotal, newStatus, b.id]
+        );
+      }
+    }
+
+
     const finalAmount = parseFloat(rental.total_amount) + lateFee + damageFee;
 
     // 1. Update motor_rentals
