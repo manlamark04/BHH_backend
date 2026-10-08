@@ -254,4 +254,157 @@ async function getAdminDashboard(req, res) {
   }
 }
 
-module.exports = { getMonthlyReport, getYearlyReport, getStaffDashboard, getAdminDashboard };
+/** GET /api/reports/financial-analytics */
+async function getFinancialAnalytics(req, res) {
+  try {
+    const { groupBy = 'monthly' } = req.query;
+    let { startDate, endDate } = req.query;
+    
+    const end = endDate ? new Date(endDate) : new Date();
+    let start = startDate ? new Date(startDate) : null;
+    
+    if (!start) {
+      if (groupBy === 'daily') start = new Date(end.getFullYear(), end.getMonth(), end.getDate() - 14);
+      else if (groupBy === 'weekly') start = new Date(end.getFullYear(), end.getMonth(), end.getDate() - (7 * 12));
+      else if (groupBy === 'yearly') start = new Date(end.getFullYear() - 5, 0, 1);
+      else start = new Date(end.getFullYear(), end.getMonth() - 11, 1);
+    }
+
+    // Format for SQL (YYYY-MM-DD)
+    // To handle timezone safely without shifting day, we can use local string parts
+    const formatSqlDate = (d) => {
+      const pad = (n) => n.toString().padStart(2, '0');
+      return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+    };
+
+    const sqlStart = formatSqlDate(start);
+    const sqlEnd = formatSqlDate(end);
+
+    const pWhere = "WHERE DATE(p.paid_at) >= ? AND DATE(p.paid_at) <= ?";
+    const eWhere = "WHERE e.expense_date >= ? AND e.expense_date <= ?";
+    const params = [sqlStart, sqlEnd];
+
+    const [payments] = await pool.query(`
+      SELECT p.amount, p.paid_at, p.method, b.booking_id, b.motor_rental_id, b.activity_rental_id 
+      FROM payments p 
+      LEFT JOIN bills b ON p.bill_id = b.id
+      ${pWhere}
+    `, params);
+
+    const [expenses] = await pool.query(`
+      SELECT e.id, e.amount, e.category, e.description, e.expense_date, u.full_name as logged_by
+      FROM expenses e 
+      LEFT JOIN users u ON e.logged_by = u.id 
+      ${eWhere}
+      ORDER BY e.created_at DESC
+    `, params);
+
+    // 1. KPI Totals
+    const totalRev = payments.reduce((sum, p) => sum + parseFloat(p.amount), 0);
+    const totalExp = expenses.reduce((sum, e) => sum + parseFloat(e.amount), 0);
+    const netProfit = totalRev - totalExp;
+    const profitMargin = totalRev > 0 ? ((netProfit / totalRev) * 100).toFixed(1) : 0;
+
+    // 2. Revenue by Category
+    let roomRev = 0, motorRev = 0, activityRev = 0, posRev = 0;
+    const methodMap = {};
+
+    // 3. Trend Aggregation
+    const trendMap = {};
+
+    
+    let curr = new Date(start);
+    if (groupBy === 'monthly') curr = new Date(curr.getFullYear(), curr.getMonth(), 1);
+    if (groupBy === 'yearly') curr = new Date(curr.getFullYear(), 0, 1);
+    if (groupBy === 'weekly') {
+      // Set to start of the week (Sunday)
+      curr.setDate(curr.getDate() - curr.getDay());
+    }
+    
+    const formatKey = (d) => {
+      if (groupBy === 'daily') return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+      if (groupBy === 'weekly') {
+        const weekStart = new Date(d);
+        weekStart.setDate(d.getDate() - d.getDay());
+        return 'Week of ' + weekStart.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+      }
+      if (groupBy === 'yearly') return d.toLocaleDateString('en-US', { year: 'numeric' });
+      return d.toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
+    };
+
+    while (curr <= end) {
+      const key = formatKey(curr);
+      if (!trendMap[key]) {
+        trendMap[key] = { name: key, revenue: 0, expenses: 0, profit: 0, sortVal: curr.getTime() };
+      }
+      if (groupBy === 'daily') curr.setDate(curr.getDate() + 1);
+      else if (groupBy === 'weekly') curr.setDate(curr.getDate() + 7);
+      else if (groupBy === 'yearly') curr.setFullYear(curr.getFullYear() + 1);
+      else curr.setMonth(curr.getMonth() + 1);
+    }
+
+    payments.forEach(p => {
+      const amt = parseFloat(p.amount);
+      if (p.booking_id) roomRev += amt;
+      else if (p.motor_rental_id) motorRev += amt;
+      else if (p.activity_rental_id) activityRev += amt;
+      else posRev += amt;
+
+      const m = p.method || 'cash';
+      methodMap[m] = (methodMap[m] || 0) + amt;
+
+      const d = new Date(p.paid_at);
+      const key = formatKey(d);
+      if (trendMap[key]) {
+        trendMap[key].revenue += amt;
+        trendMap[key].profit += amt;
+      }
+    });
+
+    const expCategoryMap = {};
+    expenses.forEach(e => {
+      const amt = parseFloat(e.amount);
+      const cat = e.category || 'Other';
+      expCategoryMap[cat] = (expCategoryMap[cat] || 0) + amt;
+
+      const d = new Date(e.expense_date);
+      const key = formatKey(d);
+      if (trendMap[key]) {
+        trendMap[key].expenses += amt;
+        trendMap[key].profit -= amt;
+      }
+    });
+
+    const expensesByCategory = Object.keys(expCategoryMap)
+      .map(k => ({ name: k, value: expCategoryMap[k] }))
+      .sort((a, b) => b.value - a.value);
+
+    const monthlyTrend = Object.values(trendMap).sort((a, b) => a.sortVal - b.sortVal);
+
+    res.json({
+      kpis: {
+        total_revenue: totalRev,
+        total_expenses: totalExp,
+        net_profit: netProfit,
+        profit_margin: profitMargin,
+        transaction_count: payments.length,
+        expense_count: expenses.length,
+      },
+      monthly_trend: monthlyTrend,
+      revenue_by_category: [
+        { name: 'Rooms', value: roomRev },
+        { name: 'Motorcycles', value: motorRev },
+        { name: 'Activities', value: activityRev },
+        { name: 'F&B / Other', value: posRev },
+      ],
+      expenses_by_category: expensesByCategory,
+      payment_methods: Object.keys(methodMap).map(k => ({ name: k, value: methodMap[k] })),
+      recent_expenses: expenses.slice(0, 15)
+    });
+  } catch (err) {
+    console.error('getFinancialAnalytics error:', err);
+    res.status(500).json({ message: err.message });
+  }
+}
+
+module.exports = { getMonthlyReport, getYearlyReport, getStaffDashboard, getAdminDashboard, getFinancialAnalytics };

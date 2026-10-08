@@ -16,4 +16,7 @@ router.get('/dashboard/staff', authenticate, requireRole('staff', 'admin'), svc.
 // GET /api/dashboard/admin
 router.get('/dashboard/admin', authenticate, requireRole('admin'), svc.getAdminDashboard);
 
+// GET /api/reports/financial-analytics
+router.get('/financial-analytics', authenticate, requireRole('admin'), svc.getFinancialAnalytics);
+
 module.exports = router;

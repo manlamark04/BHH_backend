@@ -10,6 +10,20 @@ const { validate }     = require('../middleware/validate');
 // GET /api/bills/eod-report — Staff/Admin: Daily cashier shift turnover report
 router.get('/eod-report', authenticate, requireRole('staff', 'admin'), eodSvc.getEODReport);
 
+// POST /api/bills/expenses — Staff/Admin: Log a petty cash expense
+router.post('/expenses',
+  authenticate, requireRole('staff', 'admin'),
+  [
+    body('amount').isFloat({ min: 0.01 }).withMessage('Expense amount must be greater than 0.'),
+    body('category').trim().notEmpty().withMessage('Category is required.'),
+  ],
+  validate, eodSvc.addExpense
+);
+
+// DELETE /api/bills/expenses/:id — Staff/Admin: Delete / void petty cash expense
+router.delete('/expenses/:id', authenticate, requireRole('staff', 'admin'), eodSvc.deleteExpense);
+
+
 // GET /api/bills — Staff/Admin
 router.get('/', authenticate, requireRole('staff', 'admin'), svc.getAllBills);
 

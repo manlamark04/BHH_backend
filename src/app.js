@@ -19,6 +19,7 @@ const notificationRoutes = require('./routes/notifications.routes');
 const inquiryRoutes     = require('./routes/inquiries.routes');
 const reviewRoutes      = require('./routes/reviews.routes');
 const promocodeRoutes   = require('./routes/promocodes.routes');
+const lostAndFoundRoutes= require('./routes/lostAndFound.routes');
 const { errorHandler, notFoundHandler } = require('./middleware/errorHandler');
 
 const app = express();
@@ -52,6 +53,7 @@ app.use('/api/notifications', notificationRoutes);
 app.use('/api/inquiries',     inquiryRoutes);
 app.use('/api/reviews',       reviewRoutes);
 app.use('/api/promocodes',    promocodeRoutes);
+app.use('/api/lost-and-found',lostAndFoundRoutes);
 
 
 const pool = require('./config/db');

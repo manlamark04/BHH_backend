@@ -123,4 +123,22 @@ const reviews = {
   toggleVisibility: (reviewId) => callOne('sp_toggle_review_visibility', [reviewId]),
 };
 
-module.exports = { auth, users, rooms, services, activities, bookings, rentals, billing, payments, reports, dashboards, reviews };
+// ─── EXPENSES (Petty Cash) ─────────────────────────────────────
+const expenses = {
+  add: (amount, category, description, loggedBy, expenseDate) => 
+    callOne('sp_add_expense', [amount, category, description || null, loggedBy, expenseDate || null]),
+  get: (startDate, endDate) => 
+    call('sp_get_expenses', [startDate || null, endDate || null]),
+};
+
+// ─── LOST & FOUND ──────────────────────────────────────────────
+const lostAndFound = {
+  upsert: (id, itemName, description, foundLocation, foundDate, imageUrl, loggedBy) => 
+    callOne('sp_upsert_lost_item', [id || null, itemName, description || null, foundLocation, foundDate, imageUrl || null, loggedBy]),
+  updateStatus: (id, status, claimedByName) => 
+    callVoid('sp_update_lost_item_status', [id, status, claimedByName || null]),
+  getAll: (status) => 
+    call('sp_get_lost_items', [status || null]),
+};
+
+module.exports = { auth, users, rooms, services, activities, bookings, rentals, billing, payments, reports, dashboards, reviews, expenses, lostAndFound };

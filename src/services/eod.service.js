@@ -18,8 +18,8 @@ async function getEODReport(req, res) {
         p.receipt_number,
         p.notes,
         p.paid_at,
-        b.invoice_number,
-        b.description AS bill_description,
+        b.bill_number AS invoice_number,
+        '' AS bill_description,
         u_cust.full_name AS customer_name,
         u_staff.full_name AS cashier_name
       FROM payments p
@@ -28,6 +28,17 @@ async function getEODReport(req, res) {
       LEFT JOIN users u_staff ON u_staff.id = p.received_by
       WHERE DATE(p.paid_at) = ?
       ORDER BY p.paid_at DESC
+    `, [reportDate]);
+
+    // 1.5 Fetch expenses for the requested date
+    const [expenses] = await pool.query(`
+      SELECT 
+        e.id, e.amount, e.category, e.description, e.expense_date, e.created_at,
+        u.full_name as logged_by_name
+      FROM expenses e
+      LEFT JOIN users u ON u.id = e.logged_by
+      WHERE e.expense_date = ?
+      ORDER BY e.created_at DESC
     `, [reportDate]);
 
     // 2. Aggregate metrics by payment method
@@ -63,6 +74,10 @@ async function getEODReport(req, res) {
 
     const grossTotal = cashTotal + gcashTotal + cardTotal + bankTotal + otherTotal;
     const netTotal = grossTotal - refundsTotal;
+    
+    // Calculate petty cash expenses total
+    const expensesTotal = expenses.reduce((sum, exp) => sum + Number(exp.amount), 0);
+    const netCashTotal = cashTotal - expensesTotal;
 
     res.json({
       reportDate,
@@ -72,6 +87,8 @@ async function getEODReport(req, res) {
         grossTotal,
         netTotal,
         cashTotal,
+        netCashTotal,
+        expensesTotal,
         gcashTotal,
         cardTotal,
         bankTotal,
@@ -80,6 +97,7 @@ async function getEODReport(req, res) {
         transactionCount: payments.length,
       },
       transactions: payments,
+      expenses: expenses,
     });
   } catch (err) {
     console.error('getEODReport error:', err);
@@ -87,6 +105,42 @@ async function getEODReport(req, res) {
   }
 }
 
+async function addExpense(req, res) {
+  try {
+    const { amount, category, description, expense_date } = req.body;
+    const staffId = req.user.id;
+    const dateToUse = expense_date || new Date().toISOString().split('T')[0];
+    
+    const { expenses } = require('../db/procedures');
+    const result = await expenses.add(amount, category, description, staffId, dateToUse);
+    
+    res.json({ success: true, message: 'Expense logged successfully', id: result.id });
+  } catch (err) {
+    console.error('addExpense error:', err);
+    res.status(500).json({ message: err.message || 'Failed to log expense.' });
+  }
+}
+
+async function deleteExpense(req, res) {
+  try {
+    const { id } = req.params;
+    const pool = require('../config/db');
+    const [result] = await pool.query('DELETE FROM expenses WHERE id = ?', [id]);
+    
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ message: 'Expense record not found.' });
+    }
+    
+    res.json({ success: true, message: 'Expense deleted successfully.' });
+  } catch (err) {
+    console.error('deleteExpense error:', err);
+    res.status(500).json({ message: err.message || 'Failed to delete expense.' });
+  }
+}
+
 module.exports = {
   getEODReport,
+  addExpense,
+  deleteExpense,
 };
+
