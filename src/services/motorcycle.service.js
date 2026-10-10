@@ -1038,6 +1038,12 @@ async function processMotorReturn(req, res) {
       (damage.has_damage || parseFloat(damage.estimated_repair_cost) > 0 || (damage.description && damage.description.trim()))
     );
 
+    const fuelFee = Math.max(0, parseFloat(req.body.fuel_surcharge) || 0);
+    const helmetsFee = Math.max(0, parseFloat(req.body.missing_helmets_fee) || 0);
+    const returnChecklistObj = req.body.return_checklist || null;
+    const rawReturnPhotos = Array.isArray(req.body.return_photos) ? req.body.return_photos : [];
+    const savedReturnPhotos = rawReturnPhotos.map((p, idx) => saveBase64Image(p, `return-${rental.rental_id}-${idx + 1}`));
+
     let nextMotorStatus = maintenance_needed ? 'MAINTENANCE' : 'AVAILABLE';
 
     await conn.beginTransaction();
@@ -1164,8 +1170,75 @@ async function processMotorReturn(req, res) {
       }
     }
 
+    // Add fuel surcharge to bill if applicable
+    if (fuelFee > 0) {
+      const [billRowsFuel] = await conn.query(
+        `SELECT id, bill_number, total_amount, paid_amount 
+         FROM bills 
+         WHERE motor_rental_id = ? OR bill_number = ? 
+         ORDER BY id DESC LIMIT 1`,
+        [rental.id, `BILL-${rental.rental_id}`]
+      );
 
-    const finalAmount = parseFloat(rental.total_amount) + lateFee + damageFee;
+      if (billRowsFuel.length > 0) {
+        const b = billRowsFuel[0];
+        const fuelNote = returnChecklistObj?.fuel_level ? `Fuel Return: ${returnChecklistObj.fuel_level}` : 'Low Fuel Return';
+        await conn.query(
+          `INSERT INTO bill_line_items (bill_id, description, quantity, unit_price)
+           VALUES (?, ?, 1, ?)`,
+          [
+            b.id,
+            `Refueling Surcharge (${fuelNote}) — ${rental.rental_id}`,
+            fuelFee,
+          ]
+        );
+
+        const newTotal = parseFloat(b.total_amount) + fuelFee;
+        const paidAmt = parseFloat(b.paid_amount || 0);
+        const newStatus = paidAmt >= newTotal ? 'paid' : (paidAmt > 0 ? 'partially_paid' : 'unpaid');
+
+        await conn.query(
+          `UPDATE bills SET total_amount = ?, status = ?, updated_at = NOW() WHERE id = ?`,
+          [newTotal, newStatus, b.id]
+        );
+      }
+    }
+
+    // Add missing helmets fee to bill if applicable
+    if (helmetsFee > 0) {
+      const [billRowsHelmets] = await conn.query(
+        `SELECT id, bill_number, total_amount, paid_amount 
+         FROM bills 
+         WHERE motor_rental_id = ? OR bill_number = ? 
+         ORDER BY id DESC LIMIT 1`,
+        [rental.id, `BILL-${rental.rental_id}`]
+      );
+
+      if (billRowsHelmets.length > 0) {
+        const b = billRowsHelmets[0];
+        const missingCount = returnChecklistObj?.missing_helmets_count || 1;
+        await conn.query(
+          `INSERT INTO bill_line_items (bill_id, description, quantity, unit_price)
+           VALUES (?, ?, 1, ?)`,
+          [
+            b.id,
+            `Missing Equipment: Helmet Replacement (${missingCount} missing) — ${rental.rental_id}`,
+            helmetsFee,
+          ]
+        );
+
+        const newTotal = parseFloat(b.total_amount) + helmetsFee;
+        const paidAmt = parseFloat(b.paid_amount || 0);
+        const newStatus = paidAmt >= newTotal ? 'paid' : (paidAmt > 0 ? 'partially_paid' : 'unpaid');
+
+        await conn.query(
+          `UPDATE bills SET total_amount = ?, status = ?, updated_at = NOW() WHERE id = ?`,
+          [newTotal, newStatus, b.id]
+        );
+      }
+    }
+
+    const finalAmount = parseFloat(rental.total_amount) + lateFee + damageFee + fuelFee + helmetsFee;
 
     // 1. Update motor_rentals
     await conn.query(
@@ -1179,6 +1252,8 @@ async function processMotorReturn(req, res) {
            late_fee_waiver_reason = ?,
            has_damage = ?,
            damage_fee = ?,
+           return_checklist = ?,
+           return_photos = ?,
            final_amount = ?,
            returned_by = ?,
            updated_at = NOW()
@@ -1192,6 +1267,8 @@ async function processMotorReturn(req, res) {
         waiverReason,
         hasDamage ? 1 : 0,
         damageFee,
+        returnChecklistObj ? JSON.stringify(returnChecklistObj) : null,
+        savedReturnPhotos.length > 0 ? JSON.stringify(savedReturnPhotos) : null,
         finalAmount,
         staffId,
         rental.id,
@@ -1212,6 +1289,8 @@ async function processMotorReturn(req, res) {
         : lateFee > 0
         ? `Late return penalty applied: ₱${lateFee.toLocaleString()} (${hoursLate} hr${hoursLate > 1 ? 's' : ''} late × ₱${hourlyLateRate}/hr)`
         : null,
+      fuelFee > 0 ? `Refueling surcharge applied: ₱${fuelFee.toLocaleString()}` : null,
+      helmetsFee > 0 ? `Missing helmet fee applied: ₱${helmetsFee.toLocaleString()}` : null,
       hasDamage
         ? `Damage assessed: ₱${damageFee.toLocaleString()} (${damageAssessmentRecord.severity.toUpperCase()}) — ${damageAssessmentRecord.description}`
         : null,
@@ -1250,6 +1329,8 @@ async function processMotorReturn(req, res) {
       hourly_late_rate: hourlyLateRate,
       late_fee: lateFee,
       late_fee_waived: isWaived,
+      fuel_surcharge: fuelFee,
+      missing_helmets_fee: helmetsFee,
       has_damage: hasDamage,
       damage_fee: damageFee,
       damage_assessment: damageAssessmentRecord,
