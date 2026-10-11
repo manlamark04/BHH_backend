@@ -812,6 +812,169 @@ async function editBooking(req, res) {
   }
 }
 
+/** POST /api/bookings/:id/transfer-room — Staff/Admin: Switch / Transfer room with housekeeping and billing adjustments */
+async function transferRoom(req, res) {
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    const bookingId = parseInt(req.params.id, 10);
+    const {
+      new_room_id,
+      old_room_action = 'cleaning', // 'cleaning' | 'available'
+      reason = 'Guest room transfer request',
+      rate_difference_action = 'charge', // 'charge' | 'waive'
+    } = req.body;
+
+    if (!new_room_id) {
+      await conn.rollback();
+      return res.status(400).json({ message: 'Target room (new_room_id) is required.' });
+    }
+
+    // 1. Fetch current booking and old room
+    const [bRows] = await conn.query(`
+      SELECT b.*, r.room_number AS old_room_number, r.rate_per_night AS old_rate, r.room_type AS old_room_type
+      FROM bookings b
+      LEFT JOIN rooms r ON b.room_id = r.id
+      WHERE b.id = ?
+    `, [bookingId]);
+
+    if (bRows.length === 0) {
+      await conn.rollback();
+      return res.status(404).json({ message: 'Booking not found.' });
+    }
+
+    const booking = bRows[0];
+    const oldRoomId = booking.room_id;
+
+    if (Number(oldRoomId) === Number(new_room_id)) {
+      await conn.rollback();
+      return res.status(400).json({ message: 'Selected room is the same as the current room.' });
+    }
+
+    // 2. Fetch new room
+    const [newRoomRows] = await conn.query('SELECT * FROM rooms WHERE id = ?', [new_room_id]);
+    if (newRoomRows.length === 0) {
+      await conn.rollback();
+      return res.status(404).json({ message: 'Target room does not exist.' });
+    }
+    const newRoom = newRoomRows[0];
+
+    // 3. Check for overlap on target room
+    const [overlap] = await conn.query(`
+      SELECT id FROM bookings 
+      WHERE room_id = ? 
+        AND id != ?
+        AND status NOT IN ('cancelled', 'checked_out', 'rejected')
+        AND (check_in < ? AND check_out > ?)
+    `, [new_room_id, bookingId, booking.check_out, booking.check_in]);
+
+    if (overlap.length > 0) {
+      await conn.rollback();
+      return res.status(409).json({ message: `Room ${newRoom.room_number} is already booked or occupied for these dates.` });
+    }
+
+    // 4. Calculate price difference
+    const isShortTime = booking.booking_type === 'short_time';
+    let oldCalculated = 0;
+    let newCalculated = 0;
+
+    if (isShortTime && booking.duration_hours) {
+      const dur = parseInt(booking.duration_hours, 10);
+      const oldHourly = (Number(booking.old_rate || 0) / 24) * SHORT_TIME_MULTIPLIER;
+      oldCalculated = Math.round(oldHourly * dur * 100) / 100;
+      const newHourly = (Number(newRoom.rate_per_night || 0) / 24) * SHORT_TIME_MULTIPLIER;
+      newCalculated = Math.round(newHourly * dur * 100) / 100;
+    } else {
+      const nights = Math.max(1, Math.ceil((new Date(booking.check_out) - new Date(booking.check_in)) / (1000 * 60 * 60 * 24)));
+      oldCalculated = Number(booking.old_rate || 0) * nights;
+      newCalculated = Number(newRoom.rate_per_night || 0) * nights;
+    }
+
+    const priceDiff = Math.round((newCalculated - oldCalculated) * 100) / 100;
+
+    // 5. Update booking record
+    const transferNote = `[Room Switched: Room ${booking.old_room_number || oldRoomId} -> Room ${newRoom.room_number} | Reason: ${reason} | Price diff: ₱${priceDiff > 0 ? '+' + priceDiff : priceDiff}]`;
+    const updatedNotes = booking.notes ? `${booking.notes}\n${transferNote}` : transferNote;
+
+    await conn.query(`
+      UPDATE bookings 
+      SET room_id = ?, notes = ?, updated_at = NOW()
+      WHERE id = ?
+    `, [new_room_id, updatedNotes, bookingId]);
+
+    // 6. Update Bills / Invoices
+    const [billRows] = await conn.query('SELECT * FROM bills WHERE booking_id = ? LIMIT 1', [bookingId]);
+    if (billRows.length > 0) {
+      const currentBill = billRows[0];
+      if (priceDiff !== 0 && rate_difference_action !== 'waive') {
+        const newBillTotal = Math.max(0, Number(currentBill.total_amount || 0) + priceDiff);
+        await conn.query('UPDATE bills SET total_amount = ?, updated_at = NOW() WHERE id = ?', [newBillTotal, currentBill.id]);
+
+        await conn.query(`
+          INSERT INTO bill_line_items (bill_id, description, quantity, unit_price, created_at)
+          VALUES (?, ?, 1, ?, NOW())
+        `, [
+          currentBill.id,
+          priceDiff > 0
+            ? `Room Upgrade Fee: Room ${booking.old_room_number} to Room ${newRoom.room_number}`
+            : `Room Downgrade Adjustment: Room ${booking.old_room_number} to Room ${newRoom.room_number}`,
+          priceDiff,
+        ]);
+      }
+    }
+
+    // 7. Update Room Statuses
+    const isCheckedIn = String(booking.status || '').toLowerCase() === 'checked_in';
+    const oldRoomNewStatus = old_room_action === 'available' ? 'available' : 'cleaning';
+    await conn.query('UPDATE rooms SET status = ?, updated_at = NOW() WHERE id = ?', [oldRoomNewStatus, oldRoomId]);
+
+    const targetRoomNewStatus = isCheckedIn ? 'occupied' : 'reserved';
+    await conn.query('UPDATE rooms SET status = ?, updated_at = NOW() WHERE id = ?', [targetRoomNewStatus, new_room_id]);
+
+    // 8. Audit Trail
+    const staffName = req.user ? (req.user.full_name || req.user.username) : 'Staff';
+    await requestLifecycle.logAudit(conn, {
+      entityType: 'booking',
+      entityId: bookingId,
+      fromStatus: booking.status,
+      toStatus: booking.status,
+      performedBy: req.user ? req.user.id : null,
+      performedByName: staffName,
+      triggerType: 'manual',
+      reason: `Room transferred from Room ${booking.old_room_number} to Room ${newRoom.room_number}. Reason: ${reason}. Old room set to '${oldRoomNewStatus}'.`,
+      metadata: {
+        from_room_id: oldRoomId,
+        from_room_number: booking.old_room_number,
+        to_room_id: new_room_id,
+        to_room_number: newRoom.room_number,
+        price_diff: priceDiff,
+        rate_difference_action,
+        old_room_action: oldRoomNewStatus,
+      },
+    });
+
+    await conn.commit();
+
+    res.json({
+      success: true,
+      message: `Room transferred successfully from Room ${booking.old_room_number} to Room ${newRoom.room_number}.`,
+      from_room: booking.old_room_number,
+      to_room: newRoom.room_number,
+      price_difference: priceDiff,
+      old_room_status: oldRoomNewStatus,
+      new_room_status: targetRoomNewStatus,
+    });
+  } catch (err) {
+    if (conn) {
+      try { await conn.rollback(); } catch (_) {}
+    }
+    console.error('transferRoom error:', err);
+    res.status(500).json({ message: err.message });
+  } finally {
+    if (conn) conn.release();
+  }
+}
+
 /** POST /api/bookings/:id/payment — Record payment towards booking and handle auto-advancement */
 async function recordBookingPayment(req, res) {
   try {
@@ -1664,6 +1827,7 @@ module.exports = {
   getBookingAuditTrail,
   updateBookingStatus,
   editBooking,
+  transferRoom,
   recordBookingPayment,
   getAllRentals,
   getRentalsSchedule,

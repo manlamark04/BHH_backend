@@ -113,6 +113,16 @@ router.put('/:id',
   svc.editBooking
 );
 
+// POST /api/bookings/:id/transfer-room — Staff/Admin: Switch/Transfer room
+router.post('/:id/transfer-room',
+  authenticate, requireRole('staff', 'admin'),
+  [
+    body('new_room_id').isInt().withMessage('Target room ID is required.'),
+  ],
+  validate,
+  svc.transferRoom
+);
+
 // PATCH /api/bookings/:id/status — Staff/Admin: Update status
 router.patch('/:id/status',
   authenticate, requireRole('staff', 'admin'),
