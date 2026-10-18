@@ -262,10 +262,51 @@ async function getAllCustomers(req, res) {
         u.profile_photo_url,
         creator.full_name AS created_by_name,
         creator.role AS created_by_role,
-        approver.full_name AS approved_by_name
+        approver.full_name AS approved_by_name,
+        COALESCE(bkg_stats.total_bookings, 0) AS total_bookings,
+        COALESCE(bkg_stats.completed_stays, 0) AS completed_stays,
+        COALESCE(spend_stats.total_spent, 0) AS total_spent,
+        bkg_stats.last_visit,
+        bkg_stats.last_room_number,
+        bkg_stats.favorite_room,
+        CASE
+          WHEN COALESCE(bkg_stats.total_bookings, 0) >= 3 OR COALESCE(spend_stats.total_spent, 0) >= 10000 THEN 'VIP'
+          WHEN COALESCE(bkg_stats.total_bookings, 0) >= 2 THEN 'REPEAT'
+          ELSE 'NEW'
+        END AS guest_tier
       FROM users u
       LEFT JOIN users creator ON u.created_by = creator.id
       LEFT JOIN users approver ON u.approved_by = approver.id
+      LEFT JOIN (
+        SELECT 
+          b.customer_id,
+          COUNT(b.id) AS total_bookings,
+          SUM(CASE WHEN b.status = 'checked_out' THEN 1 ELSE 0 END) AS completed_stays,
+          MAX(b.check_in) AS last_visit,
+          SUBSTRING_INDEX(GROUP_CONCAT(rm.room_number ORDER BY b.check_in DESC SEPARATOR ','), ',', 1) AS last_room_number,
+          (
+            SELECT rm2.room_number 
+            FROM bookings b2 
+            JOIN rooms rm2 ON rm2.id = b2.room_id 
+            WHERE b2.customer_id = b.customer_id 
+            GROUP BY rm2.room_number 
+            ORDER BY COUNT(b2.id) DESC, MAX(b2.check_in) DESC 
+            LIMIT 1
+          ) AS favorite_room
+        FROM bookings b
+        LEFT JOIN rooms rm ON rm.id = b.room_id
+        WHERE b.status NOT IN ('cancelled', 'rejected')
+        GROUP BY b.customer_id
+      ) bkg_stats ON bkg_stats.customer_id = u.id
+      LEFT JOIN (
+        SELECT 
+          bill.customer_id,
+          SUM(p.amount) AS total_spent
+        FROM bills bill
+        JOIN payments p ON p.bill_id = bill.id
+        WHERE p.notes IS NULL OR p.notes NOT LIKE '%[REFUNDED%'
+        GROUP BY bill.customer_id
+      ) spend_stats ON spend_stats.customer_id = u.id
       WHERE u.role = 'customer'
     `;
     const params = [];
@@ -299,7 +340,7 @@ async function getAllCustomers(req, res) {
   }
 }
 
-/** GET /api/users/customers/:id — Get single customer with audit history */
+/** GET /api/users/customers/:id — Get single customer with audit history & stay statistics */
 async function getCustomerById(req, res) {
   try {
     const targetId = parseInt(req.params.id, 10);
@@ -333,10 +374,51 @@ async function getCustomerById(req, res) {
         u.rejection_reason,
         u.profile_photo_url,
         creator.full_name AS created_by_name,
-        approver.full_name AS approved_by_name
+        approver.full_name AS approved_by_name,
+        COALESCE(bkg_stats.total_bookings, 0) AS total_bookings,
+        COALESCE(bkg_stats.completed_stays, 0) AS completed_stays,
+        COALESCE(spend_stats.total_spent, 0) AS total_spent,
+        bkg_stats.last_visit,
+        bkg_stats.last_room_number,
+        bkg_stats.favorite_room,
+        CASE
+          WHEN COALESCE(bkg_stats.total_bookings, 0) >= 3 OR COALESCE(spend_stats.total_spent, 0) >= 10000 THEN 'VIP'
+          WHEN COALESCE(bkg_stats.total_bookings, 0) >= 2 THEN 'REPEAT'
+          ELSE 'NEW'
+        END AS guest_tier
        FROM users u
        LEFT JOIN users creator ON u.created_by = creator.id
        LEFT JOIN users approver ON u.approved_by = approver.id
+       LEFT JOIN (
+        SELECT 
+          b.customer_id,
+          COUNT(b.id) AS total_bookings,
+          SUM(CASE WHEN b.status = 'checked_out' THEN 1 ELSE 0 END) AS completed_stays,
+          MAX(b.check_in) AS last_visit,
+          SUBSTRING_INDEX(GROUP_CONCAT(rm.room_number ORDER BY b.check_in DESC SEPARATOR ','), ',', 1) AS last_room_number,
+          (
+            SELECT rm2.room_number 
+            FROM bookings b2 
+            JOIN rooms rm2 ON rm2.id = b2.room_id 
+            WHERE b2.customer_id = b.customer_id 
+            GROUP BY rm2.room_number 
+            ORDER BY COUNT(b2.id) DESC, MAX(b2.check_in) DESC 
+            LIMIT 1
+          ) AS favorite_room
+        FROM bookings b
+        LEFT JOIN rooms rm ON rm.id = b.room_id
+        WHERE b.status NOT IN ('cancelled', 'rejected')
+        GROUP BY b.customer_id
+       ) bkg_stats ON bkg_stats.customer_id = u.id
+       LEFT JOIN (
+        SELECT 
+          bill.customer_id,
+          SUM(p.amount) AS total_spent
+        FROM bills bill
+        JOIN payments p ON p.bill_id = bill.id
+        WHERE p.notes IS NULL OR p.notes NOT LIKE '%[REFUNDED%'
+        GROUP BY bill.customer_id
+       ) spend_stats ON spend_stats.customer_id = u.id
        WHERE u.id = ? AND u.role = 'customer'`,
       [targetId]
     );
@@ -353,7 +435,26 @@ async function getCustomerById(req, res) {
       [targetId]
     );
 
-    res.json({ customer, audit_logs: auditLogs });
+    // Fetch recent stays for this guest
+    const [recentStays] = await pool.query(
+      `SELECT 
+        b.id,
+        CONCAT('BK-', YEAR(b.created_at), '-', LPAD(b.id, 4, '0')) AS booking_ref,
+        rm.room_number,
+        rm.room_type,
+        DATE_FORMAT(b.check_in, '%Y-%m-%d') AS check_in,
+        DATE_FORMAT(b.check_out, '%Y-%m-%d') AS check_out,
+        b.status,
+        b.created_at
+       FROM bookings b
+       JOIN rooms rm ON rm.id = b.room_id
+       WHERE b.customer_id = ?
+       ORDER BY b.check_in DESC
+       LIMIT 5`,
+      [targetId]
+    );
+
+    res.json({ customer, audit_logs: auditLogs, recent_stays: recentStays });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }

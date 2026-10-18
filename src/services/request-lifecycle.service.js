@@ -517,6 +517,26 @@ async function rejectRequest(entityType, entityId, staffUser, reason, notes = ''
  */
 async function cancelRequest(entityType, entityId, user, reason = 'Cancelled by user', autoCancelled = false, cancellationFee = 0.00) {
   const gate = await checkPaymentGate(entityType, entityId);
+
+  // If customer is attempting cancellation, verify ownership
+  if (user && user.role === 'customer' && gate.customerId && gate.customerId !== user.id) {
+    const err = new Error('Unauthorized to cancel this reservation.');
+    err.statusCode = 403;
+    throw err;
+  }
+
+  const normStatus = String(gate.currentStatus || '').toLowerCase();
+  if (['checked_in', 'checked_out', 'completed'].includes(normStatus)) {
+    const err = new Error(`Cannot cancel a reservation that is already ${gate.currentStatus}.`);
+    err.statusCode = 400;
+    throw err;
+  }
+  if (['cancelled', 'rejected'].includes(normStatus)) {
+    const err = new Error(`Reservation is already ${gate.currentStatus}.`);
+    err.statusCode = 400;
+    throw err;
+  }
+
   const tableName = entityType === 'booking' ? 'bookings' : (entityType === 'motor_rental' ? 'motor_rentals' : 'activity_rentals');
   const targetStatus = entityType === 'motor_rental' ? 'CANCELLED' : 'cancelled';
   const fee = Number(cancellationFee || 0);
@@ -524,9 +544,9 @@ async function cancelRequest(entityType, entityId, user, reason = 'Cancelled by 
   if (entityType === 'booking') {
     await pool.query(
       `UPDATE bookings 
-       SET status = ?, auto_cancelled = ?, cancellation_fee = ?, updated_at = NOW() 
+       SET status = ?, auto_cancelled = ?, cancellation_fee = ?, rejection_reason = ?, updated_at = NOW() 
        WHERE id = ?`,
-      [targetStatus, autoCancelled ? 1 : 0, fee, entityId]
+      [targetStatus, autoCancelled ? 1 : 0, fee, reason, entityId]
     );
   } else {
     await pool.query(

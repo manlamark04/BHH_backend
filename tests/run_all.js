@@ -15,6 +15,7 @@ const testFiles = [
   'test_motor_damage.js',
   'test_cancellation_billing.js',
   'test_driver_license_validation.js',
+  'test_socket_auth.js',
 ];
 
 async function runTest(file) {

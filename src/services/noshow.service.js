@@ -151,13 +151,14 @@ async function sweepExpiredCheckIns() {
     const [expiredBookings] = await pool.query(`
       SELECT b.id, b.room_id, b.check_in, b.check_out, b.booking_type, b.duration_hours, b.check_in_time
       FROM bookings b
-      WHERE b.status IN ('confirmed', 'approved', 'pending_payment', 'pending', 'requested')
+      WHERE b.status IN ('confirmed', 'approved')
+        AND b.created_at < NOW() - INTERVAL 12 HOUR
         AND (
-          -- For standard overnight stays: check-in date is strictly in the past (past 11:59:59 PM of check-in date)
-          (b.booking_type != 'short_time' AND DATE(b.check_in) < CURDATE())
+          -- For standard overnight stays: stay has completely lapsed past scheduled check-out date
+          (b.booking_type != 'short_time' AND DATE(b.check_out) < CURDATE())
           OR
-          -- For short-time stays: check-in datetime + duration has passed
-          (b.booking_type = 'short_time' AND DATE_ADD(b.check_in, INTERVAL COALESCE(b.duration_hours, 3) HOUR) < NOW())
+          -- For short-time stays: check-in datetime + duration has passed by at least 2 hours
+          (b.booking_type = 'short_time' AND DATE_ADD(b.check_in, INTERVAL COALESCE(b.duration_hours, 3) + 2 HOUR) < NOW())
         )
     `);
 

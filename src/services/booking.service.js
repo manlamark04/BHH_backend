@@ -104,7 +104,14 @@ async function getAllBookings(req, res) {
         latest_pay.paid_at AS latest_payment_date,
         latest_pay.notes AS latest_payment_notes,
         bill_tbl.discount_amount,
-        bill_tbl.promo_code
+        bill_tbl.promo_code,
+        COALESCE(bkg_count.cnt, 0) AS customer_total_stays,
+        COALESCE(spend_stats.total_spent, 0) AS customer_total_spent,
+        CASE
+          WHEN COALESCE(bkg_count.cnt, 0) >= 3 OR COALESCE(spend_stats.total_spent, 0) >= 10000 THEN 'VIP'
+          WHEN COALESCE(bkg_count.cnt, 0) >= 2 THEN 'REPEAT'
+          ELSE 'NEW'
+        END AS customer_tier
       FROM bookings b
       JOIN users u ON u.id = b.customer_id
       JOIN rooms r ON r.id = b.room_id
@@ -133,6 +140,21 @@ async function getAllBookings(req, res) {
           WHERE p2.bill_id = p1.bill_id AND (p2.notes IS NULL OR p2.notes NOT LIKE '%[REFUNDED%')
         )
       ) latest_pay ON latest_pay.booking_id = b.id
+      LEFT JOIN (
+        SELECT customer_id, COUNT(id) AS cnt 
+        FROM bookings 
+        WHERE status NOT IN ('cancelled', 'rejected') 
+        GROUP BY customer_id
+      ) bkg_count ON bkg_count.customer_id = b.customer_id
+      LEFT JOIN (
+        SELECT 
+          bill.customer_id, 
+          SUM(p.amount) AS total_spent 
+        FROM bills bill 
+        JOIN payments p ON p.bill_id = bill.id 
+        WHERE p.notes IS NULL OR p.notes NOT LIKE '%[REFUNDED%' 
+        GROUP BY bill.customer_id
+      ) spend_stats ON spend_stats.customer_id = b.customer_id
       WHERE 1=1
     `;
 
