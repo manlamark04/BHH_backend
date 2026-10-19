@@ -48,10 +48,22 @@ async function start() {
     const server = http.createServer(app);
     socketConfig.init(server);
 
-    server.listen(PORT, () => {
-      console.log(`🚀 BHH Backend running on http://localhost:${PORT}`);
+    server.listen(PORT, '0.0.0.0', () => {
+      console.log(`🚀 BHH Backend running on port ${PORT}`);
       console.log(`   Environment: ${config.env}`);
     });
+
+    // Graceful shutdown (Render sends SIGTERM on redeploy)
+    const shutdown = (signal) => {
+      console.log(`${signal} received, shutting down...`);
+      server.close(async () => {
+        try { await pool.end(); } catch (_) { /* ignore */ }
+        process.exit(0);
+      });
+      setTimeout(() => process.exit(1), 10000).unref();
+    };
+    process.on('SIGTERM', () => shutdown('SIGTERM'));
+    process.on('SIGINT', () => shutdown('SIGINT'));
   } catch (err) {
     console.error('❌ Failed to start server:', err);
     process.exit(1);

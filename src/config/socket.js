@@ -12,7 +12,7 @@ module.exports = {
           if (!origin) return callback(null, true);
           const allowed = (process.env.FRONTEND_URL || 'http://localhost:5173')
             .split(',')
-            .map(s => s.trim());
+            .map(s => s.trim().replace(/\/+$/, ''));
           if (allowed.includes(origin) || process.env.NODE_ENV === 'development') {
             return callback(null, true);
           }
