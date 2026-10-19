@@ -18,6 +18,18 @@ async function setupPromoCodes() {
     await pool.query(`INSERT IGNORE INTO promocodes (code, discount_percentage, valid_until) VALUES ('SUMMER20', 20.00, '2026-12-31 23:59:59')`);
     await pool.query(`INSERT IGNORE INTO promocodes (code, discount_percentage, valid_until) VALUES ('WELCOME10', 10.00, '2026-12-31 23:59:59')`);
 
+    try {
+      await pool.query('ALTER TABLE promocodes ADD COLUMN max_uses INT NULL DEFAULT NULL');
+    } catch (e) {
+      if (e.code !== 'ER_DUP_FIELDNAME') throw e;
+    }
+
+    try {
+      await pool.query('ALTER TABLE promocodes ADD COLUMN used_count INT NOT NULL DEFAULT 0');
+    } catch (e) {
+      if (e.code !== 'ER_DUP_FIELDNAME') throw e;
+    }
+
     // 2. Alter bills table
     try {
       await pool.query('ALTER TABLE bills ADD COLUMN discount_amount DECIMAL(10,2) DEFAULT 0.00');

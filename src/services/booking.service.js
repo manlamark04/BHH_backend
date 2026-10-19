@@ -483,11 +483,20 @@ async function createBooking(req, res) {
       let discountAmount = 0;
       let finalPromoCode = null;
       if (promo_code) {
-        const [promoRows] = await conn.query("SELECT discount_percentage, valid_until FROM promocodes WHERE code = ? AND status = 'active'", [promo_code]);
+        const cleanPromo = String(promo_code).trim().toUpperCase();
+        const [promoRows] = await conn.query(
+          "SELECT discount_percentage, valid_until, max_uses, used_count FROM promocodes WHERE UPPER(code) = ? AND status = 'active'",
+          [cleanPromo]
+        );
         if (promoRows.length > 0 && new Date(promoRows[0].valid_until) >= new Date()) {
-          const discountPct = Number(promoRows[0].discount_percentage) || 0;
-          discountAmount = basePrice * (discountPct / 100);
-          finalPromoCode = promo_code;
+          const promo = promoRows[0];
+          const hasAvailableSlot = !promo.max_uses || Number(promo.max_uses) <= 0 || (Number(promo.used_count || 0) < Number(promo.max_uses));
+          if (hasAvailableSlot) {
+            const discountPct = Number(promo.discount_percentage) || 0;
+            discountAmount = basePrice * (discountPct / 100);
+            finalPromoCode = cleanPromo;
+            await conn.query("UPDATE promocodes SET used_count = used_count + 1 WHERE UPPER(code) = ?", [cleanPromo]);
+          }
         }
       }
       totalPrice = Math.round((basePrice - discountAmount) * 100) / 100;

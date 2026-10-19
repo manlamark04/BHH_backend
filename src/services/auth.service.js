@@ -1,6 +1,7 @@
 const bcrypt    = require('bcryptjs');
 const jwt       = require('jsonwebtoken');
 const db        = require('../db/procedures');
+const { notifyStaffAndAdmin } = require('./notification.emitter');
 
 const DEFAULT_PASSWORD = 'user123';
 const SALT_ROUNDS      = 12;
@@ -126,8 +127,11 @@ async function register(req, res) {
       ]
     );
 
-    notifyStaffAndAdmin();
-    notifyStaffAndAdmin();
+    try {
+      notifyStaffAndAdmin();
+    } catch (notifErr) {
+      console.warn('Socket notification error during registration:', notifErr?.message || notifErr);
+    }
     res.status(201).json({
       message: 'Account created. Awaiting admin approval.',
       unique_id: uniqueId,
@@ -138,7 +142,7 @@ async function register(req, res) {
       return res.status(409).json({ message: 'Email or username already exists.' });
     }
     console.error('Registration error:', err);
-    res.status(500).json({ message: err.message || 'Registration failed.' });
+    res.status(500).json({ message: 'Unable to complete registration. Please try again or contact support.' });
   }
 }
 

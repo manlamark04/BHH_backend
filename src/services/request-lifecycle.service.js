@@ -566,11 +566,20 @@ async function cancelRequest(entityType, entityId, user, reason = 'Cancelled by 
     [fee, entityId]
   );
 
-  // If booking, release room back to available
+  // If booking, release room back to available and restore promo usage slot if applied
   if (entityType === 'booking') {
     const [bk] = await pool.query('SELECT room_id FROM bookings WHERE id = ?', [entityId]);
     if (bk.length > 0 && bk[0].room_id) {
       await pool.query("UPDATE rooms SET status = 'available', updated_at = NOW() WHERE id = ?", [bk[0].room_id]);
+    }
+
+    try {
+      const [billRows] = await pool.query('SELECT promo_code FROM bills WHERE booking_id = ? AND promo_code IS NOT NULL', [entityId]);
+      if (billRows.length > 0 && billRows[0].promo_code) {
+        await pool.query('UPDATE promocodes SET used_count = GREATEST(0, used_count - 1) WHERE UPPER(code) = ?', [String(billRows[0].promo_code).trim().toUpperCase()]);
+      }
+    } catch (promoRestoreErr) {
+      console.warn('Failed to restore promo used_count on cancel:', promoRestoreErr?.message || promoRestoreErr);
     }
   }
 
