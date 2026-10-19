@@ -28,7 +28,19 @@ const getAllReviews = asyncHandler(async (req, res) => {
     return sendSuccess(res, allReviews);
   } else {
     // Only return published reviews, and filter out sensitive info if necessary
-    const published = allReviews.filter(r => r.is_published);
+    let published = allReviews.filter(r => r.is_published);
+    if (req.query.rating) {
+      const targetRating = parseInt(req.query.rating, 10);
+      if (!isNaN(targetRating)) {
+        published = published.filter(r => Number(r.rating) === targetRating);
+      }
+    }
+    if (req.query.min_rating) {
+      const minRating = parseInt(req.query.min_rating, 10);
+      if (!isNaN(minRating)) {
+        published = published.filter(r => Number(r.rating) >= minRating);
+      }
+    }
     return sendSuccess(res, published);
   }
 });
