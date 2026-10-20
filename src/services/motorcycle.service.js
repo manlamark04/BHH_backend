@@ -3,28 +3,30 @@ const path = require('path');
 const pool = require('../config/db');
 const { validateDriverLicense, DRIVER_LICENSE_ERROR_MSG } = require('../utils/license.util');
 
-/** Helper to save base64 image data URL to disk in uploads folder */
+/** Helper to persist base64 image data URL directly in MySQL */
 function saveBase64Image(dataUrl, prefix = 'motor') {
   if (!dataUrl || typeof dataUrl !== 'string' || !dataUrl.startsWith('data:image/')) {
     return dataUrl;
   }
+  // Optionally write to local disk as cache
   try {
     const matches = dataUrl.match(/^data:image\/([a-zA-Z0-9+]+);base64,(.+)$/);
-    if (!matches) return dataUrl;
-    const ext = matches[1] === 'jpeg' ? 'jpg' : matches[1];
-    const buffer = Buffer.from(matches[2], 'base64');
-    const uploadsDir = path.join(__dirname, '..', '..', process.env.UPLOADS_DIR || 'uploads');
-    if (!fs.existsSync(uploadsDir)) {
-      fs.mkdirSync(uploadsDir, { recursive: true });
+    if (matches) {
+      const ext = matches[1] === 'jpeg' ? 'jpg' : matches[1];
+      const buffer = Buffer.from(matches[2], 'base64');
+      const uploadsDir = path.join(__dirname, '..', '..', process.env.UPLOADS_DIR || 'uploads');
+      if (!fs.existsSync(uploadsDir)) {
+        fs.mkdirSync(uploadsDir, { recursive: true });
+      }
+      const filename = `${prefix}-${Date.now()}-${Math.floor(Math.random() * 100000)}.${ext}`;
+      const filepath = path.join(uploadsDir, filename);
+      fs.writeFileSync(filepath, buffer);
     }
-    const filename = `${prefix}-${Date.now()}-${Math.floor(Math.random() * 100000)}.${ext}`;
-    const filepath = path.join(uploadsDir, filename);
-    fs.writeFileSync(filepath, buffer);
-    return `/uploads/${filename}`;
   } catch (err) {
-    console.error('Failed to save base64 image to disk:', err);
-    return dataUrl;
+    // Non-fatal disk cache write failure
   }
+  // Return dataUrl directly so it persists permanently in the database
+  return dataUrl;
 }
 
 /** Helper to generate next unique Rental ID: MTR-YYYY-XXXX */
