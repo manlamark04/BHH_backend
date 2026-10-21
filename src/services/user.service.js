@@ -1097,25 +1097,23 @@ async function uploadProfilePhoto(req, res) {
   }
 
   const userId = req.user.id;
-  const photoUrl = `/uploads/${req.file.filename}`;
   const conn = await pool.getConnection();
 
   try {
-    const [rows] = await conn.query('SELECT profile_photo_url FROM users WHERE id = ?', [userId]);
-    const oldPhoto = rows[0]?.profile_photo_url;
+    const fileBuffer = fs.readFileSync(req.file.path);
+    const mimeType = req.file.mimetype || 'image/jpeg';
+    const dataUri = `data:${mimeType};base64,${fileBuffer.toString('base64')}`;
 
-    await conn.query('UPDATE users SET profile_photo_url = ? WHERE id = ?', [photoUrl, userId]);
-
-    // Optional: delete old photo
-    if (oldPhoto && oldPhoto.startsWith('/uploads/')) {
-      const oldPath = path.join(__dirname, '..', '..', oldPhoto);
-      if (fs.existsSync(oldPath)) {
-        fs.unlinkSync(oldPath);
-      }
+    // Clean up temporary local upload file
+    if (fs.existsSync(req.file.path)) {
+      try { fs.unlinkSync(req.file.path); } catch (_) {}
     }
 
-    res.json({ message: 'Profile photo updated.', profile_photo_url: photoUrl });
+    await conn.query('UPDATE users SET profile_photo_url = ? WHERE id = ?', [dataUri, userId]);
+
+    res.json({ message: 'Profile photo updated.', profile_photo_url: dataUri });
   } catch (err) {
+    console.error('uploadProfilePhoto error:', err);
     res.status(500).json({ message: err.message });
   } finally {
     conn.release();
