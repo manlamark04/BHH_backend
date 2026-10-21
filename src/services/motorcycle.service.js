@@ -111,7 +111,7 @@ async function getMotorcycles(req, res) {
         m.image_url,
         m.or_image_url,
         m.cr_image_url,
-        m.registration_expiry_date,
+        DATE_FORMAT(m.registration_expiry_date, '%Y-%m-%d') AS registration_expiry_date,
         m.year_model,
         m.color,
         m.displacement,
@@ -120,7 +120,7 @@ async function getMotorcycles(req, res) {
         m.registered_owner,
         m.insurance_provider,
         m.insurance_policy_number,
-        m.insurance_expiry_date,
+        DATE_FORMAT(m.insurance_expiry_date, '%Y-%m-%d') AS insurance_expiry_date,
         CASE 
           WHEN m.status = 'MAINTENANCE' THEN 'MAINTENANCE'
           WHEN m.status = 'RESERVED' THEN 'RESERVED'
@@ -167,7 +167,13 @@ async function getMotorcycles(req, res) {
 /** GET /api/motorcycles/:id — Get single motorcycle details */
 async function getMotorcycleById(req, res) {
   try {
-    const [rows] = await pool.query('SELECT * FROM motorcycles WHERE id = ?', [req.params.id]);
+    const [rows] = await pool.query(
+      `SELECT *, 
+        DATE_FORMAT(registration_expiry_date, '%Y-%m-%d') AS registration_expiry_date,
+        DATE_FORMAT(insurance_expiry_date, '%Y-%m-%d') AS insurance_expiry_date 
+       FROM motorcycles WHERE id = ?`,
+      [req.params.id]
+    );
     if (!rows || rows.length === 0) {
       return res.status(404).json({ message: 'Motorcycle not found.' });
     }
@@ -270,6 +276,14 @@ async function updateMotorcycle(req, res) {
       ? (late_fee_hourly_rate !== null && late_fee_hourly_rate !== '' ? parseFloat(late_fee_hourly_rate) : null)
       : undefined;
 
+    const parsedRegExpiry = registration_expiry_date !== undefined
+      ? (registration_expiry_date && String(registration_expiry_date).trim() ? String(registration_expiry_date).trim() : null)
+      : undefined;
+
+    const parsedInsExpiry = insurance_expiry_date !== undefined
+      ? (insurance_expiry_date && String(insurance_expiry_date).trim() ? String(insurance_expiry_date).trim() : null)
+      : undefined;
+
     // 4. Update fields
     await pool.query(
       `UPDATE motorcycles 
@@ -283,9 +297,9 @@ async function updateMotorcycle(req, res) {
            description = COALESCE(?, description),
            image_url = COALESCE(?, image_url),
            status = COALESCE(?, status),
-           or_image_url = COALESCE(?, or_image_url),
-           cr_image_url = COALESCE(?, cr_image_url),
-           registration_expiry_date = COALESCE(?, registration_expiry_date),
+           or_image_url = ${processedOrImageUrl !== undefined ? '?' : 'or_image_url'},
+           cr_image_url = ${processedCrImageUrl !== undefined ? '?' : 'cr_image_url'},
+           registration_expiry_date = ${parsedRegExpiry !== undefined ? '?' : 'registration_expiry_date'},
            year_model = COALESCE(?, year_model),
            color = COALESCE(?, color),
            displacement = COALESCE(?, displacement),
@@ -294,7 +308,7 @@ async function updateMotorcycle(req, res) {
            registered_owner = COALESCE(?, registered_owner),
            insurance_provider = COALESCE(?, insurance_provider),
            insurance_policy_number = COALESCE(?, insurance_policy_number),
-           insurance_expiry_date = COALESCE(?, insurance_expiry_date),
+           insurance_expiry_date = ${parsedInsExpiry !== undefined ? '?' : 'insurance_expiry_date'},
            updated_at = NOW()
        WHERE id = ?`,
       [
@@ -308,9 +322,9 @@ async function updateMotorcycle(req, res) {
         description !== undefined ? description : null,
         processedImageUrl !== undefined ? processedImageUrl : null,
         status || null,
-        processedOrImageUrl !== undefined ? processedOrImageUrl : null,
-        processedCrImageUrl !== undefined ? processedCrImageUrl : null,
-        registration_expiry_date !== undefined ? registration_expiry_date : null,
+        ...(processedOrImageUrl !== undefined ? [processedOrImageUrl] : []),
+        ...(processedCrImageUrl !== undefined ? [processedCrImageUrl] : []),
+        ...(parsedRegExpiry !== undefined ? [parsedRegExpiry] : []),
         year_model !== undefined ? year_model : null,
         color !== undefined ? color : null,
         displacement !== undefined ? displacement : null,
@@ -319,7 +333,7 @@ async function updateMotorcycle(req, res) {
         registered_owner !== undefined ? registered_owner : null,
         insurance_provider !== undefined ? insurance_provider : null,
         insurance_policy_number !== undefined ? insurance_policy_number : null,
-        insurance_expiry_date !== undefined ? insurance_expiry_date : null,
+        ...(parsedInsExpiry !== undefined ? [parsedInsExpiry] : []),
         motorId
       ]
     );
