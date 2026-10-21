@@ -63,6 +63,8 @@ router.post('/customers/:id/approve', authenticate, requireRole('admin'), svc.ap
 router.post('/customers/:id/reject', authenticate, requireRole('admin'), svc.rejectCustomer);
 router.post('/customers/:id/suspend', authenticate, requireRole('admin'), svc.suspendCustomer);
 router.post('/customers/:id/reactivate', authenticate, requireRole('admin'), svc.reactivateCustomer);
+router.post('/customers/:id/reset-password', authenticate, requireRole('admin'), svc.resetCustomerPassword);
+router.post('/:id/reset-password', authenticate, requireRole('admin'), svc.resetCustomerPassword);
 
 // ─── SELF-SERVICE PROFILE PHOTO MANAGEMENT ────────────────────
 router.post('/profile-photo', authenticate, upload.single('photo'), svc.uploadProfilePhoto);

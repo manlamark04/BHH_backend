@@ -1000,7 +1000,94 @@ async function searchCustomers(req, res) {
   return getAllCustomers(req, res);
 }
 
+/** POST /api/users/customers/:id/reset-password — Admin: Reset user/customer password */
+async function resetCustomerPassword(req, res) {
+  const conn = await pool.getConnection();
+  try {
+    const targetId = parseInt(req.params.id, 10);
+    const adminId = req.user.id;
+    const adminName = req.user.full_name || req.user.username || 'Admin';
+    const { temporary_password } = req.body;
 
+    const [rows] = await conn.query('SELECT * FROM users WHERE id = ?', [targetId]);
+    if (!rows || rows.length === 0) {
+      return res.status(404).json({ message: 'User not found.' });
+    }
+    const user = rows[0];
+
+    // Determine temporary password
+    let tempPassword = temporary_password && temporary_password.trim() ? temporary_password.trim() : null;
+    if (!tempPassword) {
+      // Auto-generate based on first name or a clean default
+      const firstName = (user.full_name || user.username || 'guest').split(' ')[0].toLowerCase().replace(/[^a-z0-9]/g, '');
+      tempPassword = `${firstName || 'guest'}123`;
+    }
+
+    if (tempPassword.length < 6) {
+      return res.status(400).json({ message: 'Password must be at least 6 characters.' });
+    }
+
+    const passwordHash = await bcrypt.hash(tempPassword, SALT_ROUNDS);
+
+    await conn.beginTransaction();
+
+    await conn.query(
+      `UPDATE users 
+       SET password_hash = ?, 
+           default_password = ?, 
+           must_change_password = 1, 
+           updated_at = NOW() 
+       WHERE id = ?`,
+      [passwordHash, tempPassword, targetId]
+    );
+
+    // Audit Log in customer_audit_logs if available
+    await logCustomerAction(conn, {
+      customerId: targetId,
+      customerUniqueId: user.unique_id,
+      action: 'Password Reset by Admin',
+      performedBy: adminId,
+      performedByName: adminName,
+      performedByRole: req.user.role,
+      remarks: `Admin ${adminName} reset the password for ${user.full_name} (${user.unique_id || user.username}). Temporary password set with mandatory change on next login.`,
+    });
+
+    // Also write to audit_logs general table if present
+    try {
+      await conn.query(
+        `INSERT INTO audit_logs (user_id, action, details, ip_address) 
+         VALUES (?, 'RESET_PASSWORD', ?, ?)`,
+        [
+          adminId,
+          `Admin ${adminName} reset password for user ${user.username || user.unique_id} (ID: ${targetId})`,
+          req.ip || '127.0.0.1'
+        ]
+      );
+    } catch (_) {
+      // Ignore if audit_logs table structure is different
+    }
+
+    await conn.commit();
+
+    const [freshRows] = await pool.query(
+      'SELECT id, unique_id, role, full_name, email, phone, username, status, must_change_password FROM users WHERE id = ?',
+      [targetId]
+    );
+
+    res.json({
+      message: `Password for ${user.full_name} has been reset successfully.`,
+      temporary_password: tempPassword,
+      username: user.username,
+      user: freshRows[0],
+    });
+  } catch (err) {
+    await conn.rollback();
+    console.error('Reset password failed:', err);
+    res.status(500).json({ message: err.message || 'Failed to reset password.' });
+  } finally {
+    conn.release();
+  }
+}
 
 // ─── PROFILE PHOTO ──────────────────────────────────────────────
 
@@ -1079,4 +1166,5 @@ module.exports = {
   uploadProfilePhoto,
   removeProfilePhoto,
   searchCustomers,
+  resetCustomerPassword,
 };
