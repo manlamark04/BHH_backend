@@ -29,7 +29,46 @@ async function getYearlyReport(req, res) {
 async function getStaffDashboard(req, res) {
   try {
     const stats = await db.dashboards.staff();
-    res.json(stats);
+    let expiringMotorsCount = 0;
+    let expiredMotorsCount = 0;
+    let expiringMotorcycles = [];
+    try {
+      const [expiredRows] = await pool.query(`
+        SELECT COUNT(*) AS cnt FROM motorcycles 
+        WHERE registration_expiry_date IS NOT NULL 
+          AND registration_expiry_date < CURDATE()
+          AND status != 'INACTIVE'
+      `);
+      const [expiringRows] = await pool.query(`
+        SELECT COUNT(*) AS cnt FROM motorcycles 
+        WHERE registration_expiry_date IS NOT NULL 
+          AND registration_expiry_date >= CURDATE()
+          AND registration_expiry_date <= DATE_ADD(CURDATE(), INTERVAL 30 DAY)
+          AND status != 'INACTIVE'
+      `);
+      const [motorList] = await pool.query(`
+        SELECT 
+          id, motor_id, brand, model, plate_number, status,
+          DATE_FORMAT(registration_expiry_date, '%Y-%m-%d') AS registration_expiry_date,
+          DATEDIFF(registration_expiry_date, CURRENT_DATE()) AS days_left
+        FROM motorcycles
+        WHERE registration_expiry_date IS NOT NULL
+          AND status != 'INACTIVE'
+          AND DATEDIFF(registration_expiry_date, CURRENT_DATE()) <= 30
+        ORDER BY registration_expiry_date ASC
+        LIMIT 10
+      `);
+      expiredMotorsCount = expiredRows[0]?.cnt || 0;
+      expiringMotorsCount = expiringRows[0]?.cnt || 0;
+      expiringMotorcycles = motorList;
+    } catch (_) {}
+
+    res.json({
+      ...(stats || {}),
+      expired_motors_count: expiredMotorsCount,
+      expiring_motors_count: expiringMotorsCount,
+      expiring_motorcycles: expiringMotorcycles,
+    });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
@@ -174,6 +213,58 @@ async function getAdminDashboard(req, res) {
       }
     } catch (_) {}
 
+    // Motorcycle Registration Expiration Alerts
+    let expiringMotorcyclesAdmin = [];
+    try {
+      const [expiredMotors] = await pool.query(`
+        SELECT COUNT(*) AS cnt FROM motorcycles 
+        WHERE registration_expiry_date IS NOT NULL 
+          AND registration_expiry_date < CURDATE()
+          AND status != 'INACTIVE'
+      `);
+      const [expiringMotors] = await pool.query(`
+        SELECT COUNT(*) AS cnt FROM motorcycles 
+        WHERE registration_expiry_date IS NOT NULL 
+          AND registration_expiry_date >= CURDATE()
+          AND registration_expiry_date <= DATE_ADD(CURDATE(), INTERVAL 30 DAY)
+          AND status != 'INACTIVE'
+      `);
+      const [motorList] = await pool.query(`
+        SELECT 
+          id, motor_id, brand, model, plate_number, status,
+          DATE_FORMAT(registration_expiry_date, '%Y-%m-%d') AS registration_expiry_date,
+          DATEDIFF(registration_expiry_date, CURRENT_DATE()) AS days_left
+        FROM motorcycles
+        WHERE registration_expiry_date IS NOT NULL
+          AND status != 'INACTIVE'
+          AND DATEDIFF(registration_expiry_date, CURRENT_DATE()) <= 30
+        ORDER BY registration_expiry_date ASC
+        LIMIT 10
+      `);
+      expiringMotorcyclesAdmin = motorList;
+
+      if (expiredMotors[0]?.cnt > 0) {
+        notifications.push({
+          id: 'notif-expired-motor-reg',
+          type: 'error',
+          title: 'Expired Motorcycle Registration',
+          message: `${expiredMotors[0].cnt} motorcycle(s) have expired OR/CR registrations! Unit renewal required immediately.`,
+          time: 'Urgent Action',
+        });
+      }
+      if (expiringMotors[0]?.cnt > 0) {
+        notifications.push({
+          id: 'notif-expiring-motor-reg',
+          type: 'warning',
+          title: 'Registration Expiring Soon',
+          message: `${expiringMotors[0].cnt} motorcycle(s) have LTO registration expiring within 30 days.`,
+          time: 'Needs Renewal',
+        });
+      }
+    } catch (e) {
+      console.warn('Could not query expiring motor registrations for admin:', e.message);
+    }
+
     if (arrivalsToday.length > 0) {
       notifications.push({
         id: 'notif-arrivals-today',
@@ -245,6 +336,7 @@ async function getAdminDashboard(req, res) {
       upcoming_arrivals: upcomingArrivals,
       recent_bookings: recentBookings,
       notifications,
+      expiring_motorcycles: expiringMotorcyclesAdmin,
       revenue_breakdown: revenueBreakdown,
       bookings_30days: bookings30Days,
     });

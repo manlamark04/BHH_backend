@@ -22,7 +22,9 @@ async function getNotificationSummary(req, res) {
 
     // 2. Pending room & service bookings
     const [pendingBookings] = await pool.query(`
-      SELECT b.id, b.booking_ref, b.booking_type, b.check_in, b.check_out, b.created_at,
+      SELECT b.id, 
+             CONCAT('BK-', YEAR(b.created_at), '-', LPAD(b.id, 4, '0')) AS booking_ref,
+             b.booking_type, b.check_in, b.check_out, b.created_at,
              u.full_name AS customer_name, r.room_number, r.room_type
       FROM bookings b
       JOIN users u ON u.id = b.customer_id
@@ -34,7 +36,9 @@ async function getNotificationSummary(req, res) {
 
     // 3. Today's scheduled arrivals (check-in)
     const [todayArrivals] = await pool.query(`
-      SELECT b.id, b.booking_ref, b.check_in, b.check_out, b.status,
+      SELECT b.id, 
+             CONCAT('BK-', YEAR(b.created_at), '-', LPAD(b.id, 4, '0')) AS booking_ref,
+             b.check_in, b.check_out, b.status,
              u.full_name AS customer_name, u.phone AS customer_phone, r.room_number, r.room_type
       FROM bookings b
       JOIN users u ON u.id = b.customer_id
@@ -47,7 +51,9 @@ async function getNotificationSummary(req, res) {
 
     // 4. Today's scheduled departures (check-out)
     const [todayDepartures] = await pool.query(`
-      SELECT b.id, b.booking_ref, b.check_in, b.check_out, b.status,
+      SELECT b.id, 
+             CONCAT('BK-', YEAR(b.created_at), '-', LPAD(b.id, 4, '0')) AS booking_ref,
+             b.check_in, b.check_out, b.status,
              u.full_name AS customer_name, u.phone AS customer_phone, r.room_number, r.room_type
       FROM bookings b
       JOIN users u ON u.id = b.customer_id
@@ -60,7 +66,7 @@ async function getNotificationSummary(req, res) {
 
     // 5. Unpaid / pending payment invoices requiring collection
     const [pendingInvoices] = await pool.query(`
-      SELECT bill.id, bill.invoice_number, bill.total_amount, bill.paid_amount,
+      SELECT bill.id, bill.bill_number AS invoice_number, bill.total_amount, bill.paid_amount,
              (bill.total_amount - bill.paid_amount) AS remaining_balance,
              bill.status, bill.issued_at, u.full_name AS customer_name
       FROM bills bill
@@ -71,12 +77,34 @@ async function getNotificationSummary(req, res) {
       LIMIT 10
     `);
 
+    // 6. Expiring or expired motorcycle registrations (within 30 days or overdue)
+    let expiringMotorcycles = [];
+    try {
+      const [motorRows] = await pool.query(`
+        SELECT 
+          id, motor_id, brand, model, plate_number, status,
+          DATE_FORMAT(registration_expiry_date, '%Y-%m-%d') AS registration_expiry_date,
+          DATE_FORMAT(insurance_expiry_date, '%Y-%m-%d') AS insurance_expiry_date,
+          DATEDIFF(registration_expiry_date, CURRENT_DATE()) AS days_left
+        FROM motorcycles
+        WHERE registration_expiry_date IS NOT NULL
+          AND status != 'INACTIVE'
+          AND DATEDIFF(registration_expiry_date, CURRENT_DATE()) <= 30
+        ORDER BY registration_expiry_date ASC
+        LIMIT 15
+      `);
+      expiringMotorcycles = motorRows;
+    } catch (mErr) {
+      console.warn('Could not query expiring motorcycles:', mErr.message);
+    }
+
     // Calculate total actionable badge count
     const totalCount =
       pendingUsers.length +
       pendingBookings.length +
       todayArrivals.length +
-      todayDepartures.length;
+      todayDepartures.length +
+      expiringMotorcycles.length;
 
     res.json({
       totalCount,
@@ -86,6 +114,7 @@ async function getNotificationSummary(req, res) {
         todayArrivalsCount: todayArrivals.length,
         todayDeparturesCount: todayDepartures.length,
         pendingInvoicesCount: pendingInvoices.length,
+        expiringMotorcyclesCount: expiringMotorcycles.length,
       },
       items: {
         pendingUsers,
@@ -93,6 +122,7 @@ async function getNotificationSummary(req, res) {
         todayArrivals,
         todayDepartures,
         pendingInvoices,
+        expiringMotorcycles,
       },
       timestamp: new Date().toISOString(),
     });
