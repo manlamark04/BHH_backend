@@ -41,8 +41,15 @@ async function getActivities(req, res) {
   try {
     const [activities] = await pool.query(
       `SELECT * FROM activities 
-       WHERE LOWER(name) LIKE '%pickleball%' 
-          OR LOWER(name) LIKE '%court%'
+       WHERE is_active = 1
+         AND (
+           LOWER(name) LIKE '%pickleball%' 
+           OR LOWER(name) LIKE '%court%'
+           OR LOWER(name) LIKE '%motor%'
+           OR LOWER(name) LIKE '%scooter%'
+           OR LOWER(name) LIKE '%click%'
+           OR LOWER(name) LIKE '%bike%'
+         )
        ORDER BY id ASC`
     );
     res.json(activities);
