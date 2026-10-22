@@ -48,6 +48,9 @@ async function getEODReport(req, res) {
     let bankTotal = 0;
     let otherTotal = 0;
     let refundsTotal = 0;
+    let cashRefundsTotal = 0;
+    let creditRefundsTotal = 0;
+    let digitalRefundsTotal = 0;
 
     payments.forEach((p) => {
       const amt = Number(p.amount || 0);
@@ -55,6 +58,14 @@ async function getEODReport(req, res) {
       
       if (isRefund) {
         refundsTotal += Math.abs(amt);
+        const notesUpper = String(p.notes || '').toUpperCase();
+        if (notesUpper.includes('REBOOKING CREDIT') || notesUpper.includes('CREDIT')) {
+          creditRefundsTotal += Math.abs(amt);
+        } else if (notesUpper.includes('CASH') || String(p.method || '').toLowerCase().includes('cash')) {
+          cashRefundsTotal += Math.abs(amt);
+        } else {
+          digitalRefundsTotal += Math.abs(amt);
+        }
         return;
       }
 
@@ -77,7 +88,8 @@ async function getEODReport(req, res) {
     
     // Calculate petty cash expenses total
     const expensesTotal = expenses.reduce((sum, exp) => sum + Number(exp.amount), 0);
-    const netCashTotal = cashTotal - expensesTotal;
+    // Net cash in drawer only subtracts CASH refunds and petty cash expenses
+    const netCashTotal = cashTotal - cashRefundsTotal - expensesTotal;
 
     res.json({
       reportDate,
@@ -94,6 +106,9 @@ async function getEODReport(req, res) {
         bankTotal,
         otherTotal,
         refundsTotal,
+        cashRefundsTotal,
+        creditRefundsTotal,
+        digitalRefundsTotal,
         transactionCount: payments.length,
       },
       transactions: payments,

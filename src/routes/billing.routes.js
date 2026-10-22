@@ -59,9 +59,15 @@ router.post('/payments',
   validate, svc.recordPayment
 );
 
-// POST /api/bills/payments/:id/refund — Admin: refund payment
+// GET /api/bills/refunds — Staff/Admin: list all refunds and rebooking credits
+router.get('/refunds',
+  authenticate, requireRole('staff', 'admin'),
+  svc.getRefunds
+);
+
+// POST /api/bills/payments/:id/refund — Staff/Admin: refund payment or issue rebooking credit
 router.post('/payments/:id/refund',
-  authenticate, requireRole('admin'),
+  authenticate, requireRole('staff', 'admin'),
   [
     body('reason').trim().notEmpty().withMessage('Refund reason is required.'),
   ],

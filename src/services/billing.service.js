@@ -121,6 +121,7 @@ async function getAllBills(req, res) {
         u.unique_id AS customer_code,
         u.email AS customer_email,
         u.phone AS customer_phone,
+        u.credit_balance AS customer_credit_balance,
         su.full_name AS staff_name,
         bk.status AS booking_status,
         bk.is_arrived AS is_arrived,
@@ -501,6 +502,7 @@ async function getMyBills(req, res) {
         u.unique_id AS customer_code,
         u.email AS customer_email,
         u.phone AS customer_phone,
+        u.credit_balance AS customer_credit_balance,
         bk.status AS booking_status,
         bk.booking_type,
         bk.check_in_time,
@@ -914,8 +916,20 @@ async function recordPayment(req, res) {
       });
     }
 
-    const validMethods = ['cash', 'card', 'ewallet', 'bank_transfer', 'gcash', 'maya', 'corporate', 'other'];
+    const validMethods = ['cash', 'card', 'ewallet', 'bank_transfer', 'gcash', 'maya', 'corporate', 'credit', 'rebooking_credit', 'other'];
     const normMethod = validMethods.includes(String(method).toLowerCase()) ? String(method).toLowerCase() : 'cash';
+
+    // If paying with Rebooking Credit, check and deduct customer's credit balance
+    if (normMethod.includes('credit') && bill.customer_id) {
+      const [uRows] = await pool.query('SELECT credit_balance FROM users WHERE id = ?', [bill.customer_id]);
+      const availableCredit = Number(uRows[0]?.credit_balance || 0);
+      if (availableCredit < numAmount) {
+        return res.status(400).json({
+          message: `Insufficient rebooking credit balance. Available: ₱${availableCredit.toLocaleString()}, required: ₱${numAmount.toLocaleString()}.`
+        });
+      }
+      await pool.query('UPDATE users SET credit_balance = GREATEST(0, credit_balance - ?) WHERE id = ?', [numAmount, bill.customer_id]);
+    }
 
     const fullNotes = [ref_number ? `Ref: ${ref_number}` : '', notes || ''].filter(Boolean).join(' · ');
 
@@ -1076,12 +1090,12 @@ async function recordPayment(req, res) {
 }
 
 /**
- * POST /api/bills/payments/:id/refund — Refund a payment transaction
+ * POST /api/bills/payments/:id/refund — Refund a payment transaction or issue rebooking credit
  */
 async function refundPayment(req, res) {
   try {
     const paymentId = parseInt(req.params.id);
-    const { reason } = req.body;
+    const { reason, refund_type = 'cash', amount } = req.body;
 
     if (!reason || !reason.trim()) {
       return res.status(400).json({ message: 'Refund reason is required.' });
@@ -1096,18 +1110,60 @@ async function refundPayment(req, res) {
     }
 
     const billId = payment.bill_id;
-    const refundTag = `[REFUNDED: ${reason.trim()} by Admin on ${new Date().toISOString().split('T')[0]}]`;
-    const updatedNotes = [payment.notes, refundTag].filter(Boolean).join(' ');
+    const [bRows] = await pool.query('SELECT * FROM bills WHERE id = ?', [billId]);
+    if (bRows.length === 0) return res.status(404).json({ message: 'Associated bill not found.' });
+    const bill = bRows[0];
 
-    await pool.query('UPDATE payments SET notes = ? WHERE id = ?', [updatedNotes, paymentId]);
+    const maxRefundable = Number(payment.amount || 0);
+    const refundAmount = amount && Number(amount) > 0 ? Math.min(Number(amount), maxRefundable) : maxRefundable;
+    const refundType = ['rebooking_credit', 'cash', 'gcash', 'bank_transfer'].includes(refund_type) ? refund_type : 'cash';
 
-    // Recalculate bill
+    const typeLabel = refundType === 'rebooking_credit' ? 'REBOOKING CREDIT' : refundType.toUpperCase();
+    const staffName = req.user.full_name || req.user.username || 'Admin';
+    const refundTag = `[REFUNDED (${typeLabel}): ₱${refundAmount.toLocaleString()} - ${reason.trim()} by ${staffName} on ${new Date().toISOString().split('T')[0]}]`;
+
+    // 1. If full refund, tag existing payment notes
+    if (refundAmount >= maxRefundable) {
+      const updatedNotes = [payment.notes, refundTag].filter(Boolean).join(' ');
+      await pool.query('UPDATE payments SET notes = ? WHERE id = ?', [updatedNotes, paymentId]);
+    } else {
+      // Partial refund: decrease original payment amount and record the refunded segment
+      const remainingAmount = maxRefundable - refundAmount;
+      const updatedOrigNotes = [payment.notes, `[Partial Refund: ₱${refundAmount.toLocaleString()} via ${typeLabel}]`].filter(Boolean).join(' ');
+      await pool.query('UPDATE payments SET amount = ?, notes = ? WHERE id = ?', [remainingAmount, updatedOrigNotes, paymentId]);
+      
+      await pool.query(
+        `INSERT INTO payments (bill_id, amount, method, received_by, notes, receipt_number, paid_at)
+         VALUES (?, ?, ?, ?, ?, ?, NOW())`,
+        [billId, refundAmount, payment.method, req.user.id, refundTag, payment.receipt_number ? `${payment.receipt_number}-REF` : `REF-${paymentId}`]
+      );
+    }
+
+    // 2. Identify customer
+    let customerId = bill.customer_id;
+    if (!customerId && bill.booking_id) {
+      const [bk] = await pool.query('SELECT customer_id FROM bookings WHERE id = ?', [bill.booking_id]);
+      customerId = bk[0]?.customer_id;
+    }
+
+    // 3. If Rebooking Credit, increment customer's credit balance
+    if (refundType === 'rebooking_credit' && customerId) {
+      await pool.query('UPDATE users SET credit_balance = credit_balance + ? WHERE id = ?', [refundAmount, customerId]);
+    }
+
+    // 4. Record into `refunds` table
+    const entityType = bill.booking_id ? 'booking' : (bill.motor_rental_id ? 'motor_rental' : 'activity_rental');
+    const entityId = bill.booking_id || bill.motor_rental_id || bill.activity_rental_id || billId;
+    await pool.query(
+      `INSERT INTO refunds (entity_type, entity_id, bill_id, payment_id, customer_id, amount, refund_type, status, reason, processed_by, processed_at, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'processed', ?, ?, NOW(), NOW())`,
+      [entityType, entityId, billId, paymentId, customerId || null, refundAmount, refundType, reason.trim(), req.user.id]
+    );
+
+    // 5. Recalculate bill total paid and status
     const [paidRows] = await pool.query("SELECT SUM(amount) AS total_paid FROM payments WHERE bill_id = ? AND notes NOT LIKE '%[REFUNDED%'", [billId]);
     const newTotalPaid = Number(paidRows[0]?.total_paid || 0);
-
-    const [bRows] = await pool.query('SELECT * FROM bills WHERE id = ?', [billId]);
-    const bill = bRows[0];
-    const totalAmount = Number(bill?.total_amount || 0);
+    const totalAmount = Number(bill.total_amount || 0);
 
     let newStatus = 'unpaid';
     if (newTotalPaid >= totalAmount && totalAmount > 0) newStatus = 'paid';
@@ -1130,7 +1186,7 @@ async function refundPayment(req, res) {
             performedBy: req.user.id,
             performedByName: req.user.full_name,
             triggerType: 'system',
-            reason: `Payment refunded/reversed. Dropped below deposit threshold. Reverted to Pending Payment.`,
+            reason: `Payment refunded/reversed (${typeLabel}). Dropped below deposit threshold. Reverted to Pending Payment.`,
           });
         }
       } else if (bill.activity_rental_id) {
@@ -1145,7 +1201,7 @@ async function refundPayment(req, res) {
             performedBy: req.user.id,
             performedByName: req.user.full_name,
             triggerType: 'system',
-            reason: `Payment refunded/reversed. Dropped below deposit threshold. Reverted to Pending Payment.`,
+            reason: `Payment refunded/reversed (${typeLabel}). Dropped below deposit threshold. Reverted to Pending Payment.`,
           });
         }
       }
@@ -1162,13 +1218,42 @@ async function refundPayment(req, res) {
     } catch (_) {}
 
     res.json({
-      message: `Payment of ₱${Number(payment.amount).toLocaleString()} refunded successfully.`,
-      refunded_amount: Number(payment.amount),
+      message: `Refund of ₱${refundAmount.toLocaleString()} (${typeLabel}) processed successfully.`,
+      refunded_amount: refundAmount,
+      refund_type: refundType,
       new_total_paid: newTotalPaid,
       bill_status: newStatus.toUpperCase(),
     });
   } catch (err) {
     console.error('refundPayment error:', err);
+    res.status(500).json({ message: err.message });
+  }
+}
+
+/**
+ * GET /api/bills/refunds — Admin/Staff: list all processed refunds & credits
+ */
+async function getRefunds(req, res) {
+  try {
+    const [rows] = await pool.query(`
+      SELECT 
+        r.*,
+        u.full_name AS customer_name,
+        u.email AS customer_email,
+        u.phone AS customer_phone,
+        b.bill_number,
+        p.method AS original_payment_method,
+        staff.full_name AS processed_by_name
+      FROM refunds r
+      LEFT JOIN users u ON u.id = r.customer_id
+      LEFT JOIN bills b ON b.id = r.bill_id
+      LEFT JOIN payments p ON p.id = r.payment_id
+      LEFT JOIN users staff ON staff.id = r.processed_by
+      ORDER BY r.created_at DESC
+    `);
+    res.json(rows);
+  } catch (err) {
+    console.error('getRefunds error:', err);
     res.status(500).json({ message: err.message });
   }
 }
@@ -1397,6 +1482,7 @@ module.exports = {
   generateBill,
   recordPayment,
   refundPayment,
+  getRefunds,
   cancelBill,
   verifyDriverLicense,
   flagDriverLicense,
