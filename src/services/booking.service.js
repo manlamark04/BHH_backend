@@ -1835,7 +1835,14 @@ async function markArrived(req, res) {
   try {
     await ensureBookingColumns();
     const bookingId = parseInt(req.params.id);
+    const [bRows] = await pool.query('SELECT * FROM bookings WHERE id = ?', [bookingId]);
+    if (bRows.length === 0) return res.status(404).json({ message: 'Booking not found.' });
+    const booking = bRows[0];
+
     await pool.query('UPDATE bookings SET is_arrived = 1, updated_at = NOW() WHERE id = ?', [bookingId]);
+    if (booking.room_id) {
+      await pool.query("UPDATE rooms SET status = 'occupied', updated_at = NOW() WHERE id = ?", [booking.room_id]);
+    }
     res.json({ message: 'Guest marked as arrived.' });
   } catch (err) {
     console.error('markArrived error:', err);
