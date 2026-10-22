@@ -163,9 +163,9 @@ async function getAllBills(req, res) {
         mr.license_flag_reason AS motor_license_flag_reason,
         bli.line_items_summary
       FROM bills b
-      LEFT JOIN users u ON u.id = b.customer_id
-      LEFT JOIN users su ON su.id = b.issued_by
       LEFT JOIN bookings bk ON bk.id = b.booking_id
+      LEFT JOIN users u ON u.id = COALESCE(b.customer_id, bk.customer_id)
+      LEFT JOIN users su ON su.id = b.issued_by
       LEFT JOIN rooms r ON r.id = bk.room_id
       LEFT JOIN activity_rentals ar ON ar.id = b.activity_rental_id
       LEFT JOIN activities a ON a.id = ar.activity_id
@@ -374,6 +374,7 @@ async function getAllBills(req, res) {
         customer_code: b.customer_code,
         customer_email: finalCustomerEmail,
         customer_phone: finalCustomerPhone,
+        customer_credit_balance: Number(b.customer_credit_balance || 0),
         booking_id: b.booking_id,
         booking_ref: bookingRef,
         booking_status: b.booking_status,
@@ -722,6 +723,7 @@ async function getMyBills(req, res) {
         invoice_number: invoiceNumber,
         bill_number: b.bill_number,
         customer_id: b.customer_id,
+        customer_credit_balance: Number(b.customer_credit_balance || 0),
         booking_id: b.booking_id,
         booking_ref: bookingRef,
         booking_type: b.booking_type,
@@ -920,15 +922,20 @@ async function recordPayment(req, res) {
     const normMethod = validMethods.includes(String(method).toLowerCase()) ? String(method).toLowerCase() : 'cash';
 
     // If paying with Rebooking Credit, check and deduct customer's credit balance
-    if (normMethod.includes('credit') && bill.customer_id) {
-      const [uRows] = await pool.query('SELECT credit_balance FROM users WHERE id = ?', [bill.customer_id]);
+    let effectiveCustId = bill.customer_id;
+    if (!effectiveCustId && bill.booking_id) {
+      const [bRows] = await pool.query('SELECT customer_id FROM bookings WHERE id = ?', [bill.booking_id]);
+      effectiveCustId = bRows[0]?.customer_id;
+    }
+    if (normMethod.includes('credit') && effectiveCustId) {
+      const [uRows] = await pool.query('SELECT credit_balance FROM users WHERE id = ?', [effectiveCustId]);
       const availableCredit = Number(uRows[0]?.credit_balance || 0);
       if (availableCredit < numAmount) {
         return res.status(400).json({
           message: `Insufficient rebooking credit balance. Available: ₱${availableCredit.toLocaleString()}, required: ₱${numAmount.toLocaleString()}.`
         });
       }
-      await pool.query('UPDATE users SET credit_balance = GREATEST(0, credit_balance - ?) WHERE id = ?', [numAmount, bill.customer_id]);
+      await pool.query('UPDATE users SET credit_balance = GREATEST(0, credit_balance - ?) WHERE id = ?', [numAmount, effectiveCustId]);
     }
 
     const fullNotes = [ref_number ? `Ref: ${ref_number}` : '', notes || ''].filter(Boolean).join(' · ');
