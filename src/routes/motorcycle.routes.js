@@ -74,6 +74,13 @@ router.get('/damage-history',
   svc.getDamageHistory
 );
 
+// Staff/Admin: Release motorcycle to guest (defer payment to checkout)
+router.patch('/rentals/:id/release',
+  authenticate,
+  requireRole('staff', 'admin'),
+  svc.releaseMotorRental
+);
+
 // Cancel rental
 router.post('/rentals/:id/cancel',
   authenticate,

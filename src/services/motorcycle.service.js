@@ -1673,6 +1673,117 @@ async function rejectMotorRental(req, res) {
   }
 }
 
+/** PATCH /api/motorcycles/rentals/:id/release — Staff/Admin: Release motorcycle to guest (even without upfront payment) */
+async function releaseMotorRental(req, res) {
+  const conn = await pool.getConnection();
+  try {
+    const targetRentalId = req.params.id;
+    const [rentalRows] = await conn.query(
+      'SELECT * FROM motor_rentals WHERE (id = ? OR rental_id = ?)',
+      [targetRentalId, targetRentalId]
+    );
+
+    if (!rentalRows || rentalRows.length === 0) {
+      return res.status(404).json({ message: 'Rental not found.' });
+    }
+
+    const rental = rentalRows[0];
+
+    // Only PENDING_PAYMENT or RESERVED rentals can be released
+    if (!['PENDING_PAYMENT', 'RESERVED'].includes(rental.status)) {
+      return res.status(400).json({
+        message: `Cannot release a rental with status "${rental.status}". Only PENDING_PAYMENT or RESERVED rentals can be released.`,
+      });
+    }
+
+    // Verify motorcycle exists and is available for release
+    const [motorRows] = await conn.query('SELECT * FROM motorcycles WHERE id = ? FOR UPDATE', [rental.motor_id]);
+    if (!motorRows || motorRows.length === 0) {
+      return res.status(404).json({ message: 'Associated motorcycle not found.' });
+    }
+
+    await conn.beginTransaction();
+
+    // 1. Transition rental status to ACTIVE
+    await conn.query(
+      'UPDATE motor_rentals SET status = ?, updated_at = NOW() WHERE id = ?',
+      ['ACTIVE', rental.id]
+    );
+
+    // 2. Mark motorcycle as RENTED
+    await conn.query(
+      'UPDATE motorcycles SET status = ?, updated_at = NOW() WHERE id = ?',
+      ['RENTED', rental.motor_id]
+    );
+
+    // 3. Ensure the associated bill remains unpaid (charge to checkout)
+    // The bill stays as-is (unpaid/pending) so the guest settles at checkout
+    // Just verify the bill exists
+    const [billRows] = await conn.query(
+      "SELECT id, status FROM bills WHERE motor_rental_id = ? OR bill_number = ? LIMIT 1",
+      [rental.id, `BILL-${rental.rental_id}`]
+    );
+
+    let billNote = '';
+    if (billRows && billRows.length > 0) {
+      const bill = billRows[0];
+      // If the bill was somehow cancelled (shouldn't happen), reactivate it
+      if (bill.status === 'cancelled') {
+        await conn.query(
+          "UPDATE bills SET status = 'unpaid', updated_at = NOW() WHERE id = ?",
+          [bill.id]
+        );
+        billNote = ' Bill re-activated as unpaid.';
+      } else {
+        billNote = ` Bill #${bill.id} remains ${bill.status} — will be settled at checkout.`;
+      }
+    }
+
+    // 4. Audit log
+    const performerName = req.user.full_name || req.user.username;
+    const performerRole = req.user.role === 'admin' ? 'Admin' : 'Staff';
+    await logMotorRentalAction(conn, {
+      rentalId: rental.id,
+      rentalUniqueId: rental.rental_id,
+      motorId: rental.motor_id,
+      action: 'Motor released to guest (payment deferred)',
+      performedBy: req.user.id,
+      performedByName: performerName,
+      performedByRole: req.user.role,
+      remarks: `${performerRole} ${performerName} released motorcycle (${motorRows[0].brand} ${motorRows[0].model}, Plate: ${motorRows[0].plate_number}) to guest. Rental ${rental.rental_id} status changed from ${rental.status} → ACTIVE. Payment deferred to checkout.${billNote}`,
+    });
+
+    await conn.commit();
+
+    // Fetch updated rental for response
+    const [updatedRentalRows] = await pool.query(
+      `SELECT 
+        mr.*,
+        m.brand, m.model, m.type AS motor_type, m.plate_number, m.image_url,
+        u.full_name AS customer_name, u.email AS customer_email, u.phone AS customer_phone, u.unique_id AS customer_unique_id,
+        creator.full_name AS created_by_name
+       FROM motor_rentals mr
+       JOIN motorcycles m ON mr.motor_id = m.id
+       LEFT JOIN users u ON mr.customer_id = u.id
+       LEFT JOIN users creator ON mr.created_by = creator.id
+       WHERE mr.id = ?`,
+      [rental.id]
+    );
+
+    res.json({
+      success: true,
+      message: `Motorcycle released to guest successfully! Rental ${rental.rental_id} is now ACTIVE. Payment will be settled at checkout.`,
+      rental: updatedRentalRows[0] || null,
+    });
+  } catch (err) {
+    await conn.rollback();
+    console.error('releaseMotorRental error:', err);
+    res.status(500).json({ message: err.message || 'Failed to release motorcycle.' });
+  } finally {
+    conn.release();
+  }
+}
+
 module.exports = {
   getMotorcycles,
   getMotorcycleById,
@@ -1689,4 +1800,5 @@ module.exports = {
   cancelMotorRental,
   approveMotorRental,
   rejectMotorRental,
+  releaseMotorRental,
 };
