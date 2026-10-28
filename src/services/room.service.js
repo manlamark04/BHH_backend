@@ -15,8 +15,8 @@ async function getRooms(req, res) {
         r.rate_per_night,
         CASE
           WHEN LOWER(r.status) IN ('maintenance', 'cleaning', 'unavailable', 'inactive') THEN LOWER(r.status)
-          WHEN occ_bkg.id IS NOT NULL THEN 'occupied'
-          WHEN res_bkg.id IS NOT NULL THEN 'reserved'
+          WHEN LOWER(r.status) = 'occupied' OR occ_bkg.id IS NOT NULL THEN 'occupied'
+          WHEN LOWER(r.status) = 'reserved' OR res_bkg.id IS NOT NULL THEN 'reserved'
           ELSE 'available'
         END AS status,
         r.description,

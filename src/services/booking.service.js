@@ -743,6 +743,41 @@ async function updateBookingStatus(req, res) {
       await pool.query("UPDATE rooms SET status = 'occupied', updated_at = NOW() WHERE id = ?", [booking.room_id]);
     } else if (normStatus === 'checked_out' || normStatus === 'completed') {
       await pool.query("UPDATE rooms SET status = 'cleaning', updated_at = NOW() WHERE id = ?", [booking.room_id]);
+      try {
+        const [pendingServices] = await pool.query(
+          "SELECT * FROM guest_service_availments WHERE booking_id = ? AND payment_status = 'pending'",
+          [bookingId]
+        );
+        if (pendingServices.length > 0) {
+          const [billRows] = await pool.query(
+            "SELECT id, total_amount, paid_amount FROM bills WHERE booking_id = ? AND (bill_number IS NULL OR bill_number NOT LIKE 'INV-SRV-%') LIMIT 1",
+            [bookingId]
+          );
+          const bId = billRows[0]?.id;
+          let addedTotal = 0;
+          for (const s of pendingServices) {
+            addedTotal += Number(s.total_amount || 0);
+            if (bId) {
+              await pool.query(
+                "INSERT INTO bill_line_items (bill_id, description, quantity, unit_price) VALUES (?, ?, ?, ?)",
+                [bId, `${s.service_name} (Availment settled at checkout)`, s.quantity, s.unit_price]
+              );
+            }
+          }
+          if (bId && addedTotal > 0) {
+            await pool.query(
+              "UPDATE bills SET total_amount = total_amount + ?, paid_amount = paid_amount + ? WHERE id = ?",
+              [addedTotal, addedTotal, bId]
+            );
+          }
+          await pool.query(
+            "UPDATE guest_service_availments SET payment_status = 'settled_at_checkout', settled_at = NOW() WHERE booking_id = ? AND payment_status = 'pending'",
+            [bookingId]
+          );
+        }
+      } catch (svcErr) {
+        console.warn('Auto-settle guest services on checkout warning:', svcErr.message);
+      }
     } else if (normStatus === 'cancelled' || normStatus === 'rejected' || normStatus === 'no_show') {
       await pool.query("UPDATE rooms SET status = 'available', updated_at = NOW() WHERE id = ?", [booking.room_id]);
     }
