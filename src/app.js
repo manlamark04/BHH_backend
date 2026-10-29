@@ -40,6 +40,7 @@ app.use(cors({
   origin: (origin, callback) => {
     // Allow non-browser requests (curl, health checks) and whitelisted origins
     if (!origin || process.env.VERCEL || allowedOrigins.includes('*') || allowedOrigins.includes(origin) || origin.endsWith('.vercel.app') || origin.startsWith('http://localhost:') || process.env.NODE_ENV === 'development') {
+
       return callback(null, true);
     }
     return callback(null, false);
