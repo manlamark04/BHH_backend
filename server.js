@@ -30,8 +30,13 @@ async function seedInitialAdmin() {
 }
 
 async function ensureUploadsDir() {
-  const dir = path.join(__dirname, config.uploadsDir);
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  if (process.env.VERCEL) return;
+  try {
+    const dir = path.join(__dirname, config.uploadsDir);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  } catch (_) {
+    // Ignore on read-only filesystems
+  }
 }
 
 async function start() {
@@ -70,4 +75,8 @@ async function start() {
   }
 }
 
-start();
+if (require.main === module && !process.env.VERCEL) {
+  start();
+}
+
+module.exports = app;

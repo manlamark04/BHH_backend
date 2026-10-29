@@ -98,7 +98,7 @@ function validateEnv(env = process.env, { throwOnError = false } = {}) {
       throw new Error(`Environment Validation Failed: ${errors.join('; ')}`);
     } else {
       console.error(errorBanner);
-      process.exit(1);
+      if (!env.VERCEL) process.exit(1);
     }
   }
 

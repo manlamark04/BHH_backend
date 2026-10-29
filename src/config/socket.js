@@ -99,7 +99,9 @@ module.exports = {
   },
   getIo: () => {
     if (!io) {
-      console.warn('Socket.io not initialized, returning mock to prevent crashes');
+      if (!process.env.VERCEL) {
+        console.warn('Socket.io not initialized, returning mock to prevent crashes');
+      }
       return { to: () => ({ emit: () => {} }), emit: () => {} };
     }
     return io;

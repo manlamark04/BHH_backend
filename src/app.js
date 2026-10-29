@@ -39,7 +39,7 @@ app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
 app.use(cors({
   origin: (origin, callback) => {
     // Allow non-browser requests (curl, health checks) and whitelisted origins
-    if (!origin || allowedOrigins.includes(origin) || process.env.NODE_ENV === 'development') {
+    if (!origin || process.env.VERCEL || allowedOrigins.includes('*') || allowedOrigins.includes(origin) || origin.endsWith('.vercel.app') || origin.startsWith('http://localhost:') || process.env.NODE_ENV === 'development') {
       return callback(null, true);
     }
     return callback(null, false);
@@ -49,6 +49,15 @@ app.use(cors({
 app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
+
+// On Vercel serverless, trigger throttled request-lifecycle checks per warm instance
+if (process.env.VERCEL) {
+  const { runLifecyclePassThrottled } = require('./services/scheduler');
+  app.use((req, res, next) => {
+    runLifecyclePassThrottled(60000);
+    next();
+  });
+}
 
 // ── Static uploads folder ──────────────────────────────────
 app.use('/uploads', express.static(path.join(__dirname, '..', process.env.UPLOADS_DIR || 'uploads')));
@@ -448,6 +457,17 @@ app.get('/api/health', async (req, res) => {
     targetDatabase: process.env.DB_NAME || 'bhh',
     timestamp: new Date().toISOString()
   });
+});
+
+// ── Cron / Lifecycle endpoint (Vercel Serverless) ───────────
+app.get('/api/cron/lifecycle', async (req, res) => {
+  try {
+    const { runLifecyclePass } = require('./services/scheduler');
+    await runLifecyclePass();
+    res.json({ status: 'ok', message: 'Lifecycle pass completed', timestamp: new Date().toISOString() });
+  } catch (err) {
+    res.status(500).json({ status: 'error', message: err.message });
+  }
 });
 
 // ── 404 & Global error handlers ─────────────────────────────
