@@ -55,3 +55,6 @@ Thumbs.db
 *.bak
 *.tmp
 *.temp
+
+# Vercel
+.vercel
